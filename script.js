@@ -1,4 +1,20 @@
 /* ========================================
+   THREE.JS IMPORTS
+   ======================================== */
+import * as THREE from 'three';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ========================================
+   THREE.JS SCENE VARIABLES
+   ======================================== */
+let scene, camera, renderer, controls;
+let guitarModel = null;
+let fretZones = []; // Array of clickable mesh zones for frets
+let raycaster, mouse;
+
+/* ========================================
    STATE MANAGEMENT
    ======================================== */
 const state = {
@@ -182,6 +198,320 @@ function renderMenu() {
     document.getElementById('triadsMode').addEventListener('click', startTriadsGame);
 }
 
+/* ========================================
+   THREE.JS SETUP AND MODEL LOADING
+   ======================================== */
+function initThreeJS(container) {
+    try {
+        // Create scene
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+
+        // Create camera
+        camera = new THREE.PerspectiveCamera(
+            45,
+            container.clientWidth / container.clientHeight,
+            0.1,
+            1000
+        );
+        camera.position.set(0, 1.5, 3);
+        camera.lookAt(0, 0, 0);
+
+        // Create renderer
+        try {
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+        } catch (e) {
+            // Try without antialias if that was the issue, though unlikely for this specific error
+            try {
+                renderer = new THREE.WebGLRenderer({ antialias: false });
+            } catch (e2) {
+                console.error("WebGL not supported:", e2);
+                return false;
+            }
+        }
+
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        container.appendChild(renderer.domElement);
+
+        // Add lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(2, 4, 3);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        const fillLight = new THREE.DirectionalLight(0x6699ff, 0.3);
+        fillLight.position.set(-2, 2, -3);
+        scene.add(fillLight);
+
+        // Setup OrbitControls
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 0.5;
+        controls.maxDistance = 8;
+        controls.maxPolarAngle = Math.PI / 1.5;
+        controls.target.set(0, 0, 0);
+        controls.update();
+
+        // Setup raycaster for click detection
+        raycaster = new THREE.Raycaster();
+        mouse = new THREE.Vector2();
+
+        // Handle window resize
+        window.addEventListener('resize', onWindowResize);
+
+        // Start animation loop
+        animate();
+
+        return true;
+    } catch (error) {
+        console.error("Error initializing Three.js:", error);
+        return false;
+    }
+}
+
+function onWindowResize() {
+    const container = document.querySelector('.fretboard-container');
+    if (container && camera && renderer) {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+    }
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    if (controls) controls.update();
+    if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+    }
+}
+
+function loadGuitarModel() {
+    return new Promise((resolve, reject) => {
+        const mtlLoader = new MTLLoader();
+        mtlLoader.setPath('Gibson 335/');
+
+        mtlLoader.load('Gibson 335_Low_Poly.mtl', (materials) => {
+            materials.preload();
+
+            const objLoader = new OBJLoader();
+            objLoader.setMaterials(materials);
+            objLoader.setPath('Gibson 335/');
+
+            objLoader.load(
+                'Gibson 335_Low_Poly.obj',
+                (object) => {
+                    guitarModel = object;
+
+                    // Load custom texture
+                    const textureLoader = new THREE.TextureLoader();
+                    const texture = textureLoader.load('Gibson 335/Texturas/Tex_Caja_2.jpg');
+                    texture.colorSpace = THREE.SRGBColorSpace;
+
+                    // Scale and position the guitar
+                    guitarModel.scale.set(0.8, 0.8, 0.8);
+                    guitarModel.position.set(0, -0.5, 0);
+                    guitarModel.rotation.y = Math.PI / 2; // Rotate to horizontal
+
+                    // Enable shadows and apply texture
+                    guitarModel.traverse((child) => {
+                        if (child.isMesh) {
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+
+                            // Apply texture to material
+                            if (child.material) {
+                                if (Array.isArray(child.material)) {
+                                    child.material.forEach(mat => {
+                                        mat.map = texture;
+                                        mat.needsUpdate = true;
+                                    });
+                                } else {
+                                    child.material.map = texture;
+                                    child.material.needsUpdate = true;
+                                }
+                            }
+                        }
+                    });
+
+                    scene.add(guitarModel);
+
+                    // Create fret zones after model is loaded
+                    createFretZones();
+
+                    resolve(guitarModel);
+                },
+                (xhr) => {
+                    console.log((xhr.loaded / xhr.total * 100) + '% loaded');
+                },
+                (error) => {
+                    console.error('Error loading OBJ:', error);
+                    reject(error);
+                }
+            );
+        }, undefined, (error) => {
+            console.error('Error loading MTL:', error);
+            reject(error);
+        });
+    });
+}
+
+function createFretZones() {
+    // Clear existing zones
+    fretZones.forEach(zone => scene.remove(zone));
+    fretZones = [];
+
+    // Create invisible clickable zones for each fret/string combination
+    // These positions will need to be calibrated based on the actual model
+    const stringSpacing = 0.05; // Spacing between strings
+    const fretSpacing = 0.20; // Approximate spacing between frets
+    const neckStartZ = -2.8; // Start at headstock (left side)
+    const neckStartY = -0.49; // Y position of strings (adjusted to be between -0.45 and -0.65)
+    const slope = 0.014; // Correction for neck angle
+
+    for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
+        for (let fretIndex = 1; fretIndex < NUM_FRETS; fretIndex++) {
+            const geometry = new THREE.SphereGeometry(0.03, 8, 8); // Slightly larger for easier clicking
+            const material = new THREE.MeshBasicMaterial({
+                color: 0xff0000, // Red for debugging
+                transparent: true,
+                opacity: 0.5 // Visible for debugging
+            });
+
+            const zone = new THREE.Mesh(geometry, material);
+
+            // Position the zone
+            // Fret 1 is furthest left (most negative), Fret 12 is closer to body
+            // We need to map fretIndex 1..12 to positions
+            // Let's assume neckStartZ is the Nut (Fret 0)
+            zone.position.x = neckStartZ + (fretIndex * fretSpacing);
+            zone.position.y = neckStartY + (fretIndex * slope); // Apply slope correction
+            zone.position.z = (stringIndex - 2.5) * stringSpacing;
+
+            // Store metadata
+            zone.userData = {
+                stringIndex,
+                fretIndex,
+                note: getNoteAt(stringIndex, fretIndex)
+            };
+
+            scene.add(zone);
+            fretZones.push(zone);
+        }
+    }
+}
+
+function setupFretClickHandler() {
+    renderer.domElement.addEventListener('click', onFretClick);
+}
+
+function onFretClick(event) {
+    // Calculate mouse position in normalized device coordinates
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    // Update raycaster
+    raycaster.setFromCamera(mouse, camera);
+
+    // Check for intersections with fret zones
+    const intersects = raycaster.intersectObjects(fretZones);
+
+    if (intersects.length > 0) {
+        const clickedZone = intersects[0].object;
+        const { stringIndex, fretIndex, note } = clickedZone.userData;
+
+        // Call the appropriate handler based on game mode
+        if (state.currentScreen === 'singleNote') {
+            handleSingleNoteClick(stringIndex, fretIndex, note);
+        } else if (state.currentScreen === 'findAll') {
+            handleFindAllClick(stringIndex, fretIndex, note);
+        } else if (state.currentScreen === 'triads') {
+            handleTriadClick(stringIndex, fretIndex, note);
+        }
+    }
+}
+
+function cleanupThreeJS() {
+    // Remove event listeners
+    if (renderer && renderer.domElement) {
+        renderer.domElement.removeEventListener('click', onFretClick);
+    }
+    window.removeEventListener('resize', onWindowResize);
+
+    // Dispose of Three.js objects
+    if (renderer) {
+        renderer.dispose();
+        if (renderer.domElement && renderer.domElement.parentNode) {
+            renderer.domElement.parentNode.removeChild(renderer.domElement);
+        }
+    }
+
+    if (scene) {
+        scene.traverse((object) => {
+            if (object.geometry) object.geometry.dispose();
+            if (object.material) {
+                if (Array.isArray(object.material)) {
+                    object.material.forEach(mat => mat.dispose());
+                } else {
+                    object.material.dispose();
+                }
+            }
+        });
+    }
+
+    // Clear references
+    scene = null;
+    camera = null;
+    renderer = null;
+    controls = null;
+    guitarModel = null;
+    fretZones = [];
+}
+
+
+function fallbackToCSS(container, gameMode) {
+    console.log("Falling back to CSS renderer");
+    cleanupThreeJS(); // Ensure clean state
+    container.classList.add('use-css-fallback');
+
+    // Determine highlighted positions based on game mode
+    let highlighted = [];
+    if (gameMode === 'findAll') {
+        highlighted = state.foundPositions;
+    } else if (gameMode === 'triads') {
+        highlighted = state.clickedTriadPositions;
+    }
+
+    container.innerHTML = renderFretboard(highlighted);
+
+    // Add listeners
+    container.querySelectorAll('.fret').forEach(fret => {
+        if (gameMode === 'singleNote') {
+            fret.addEventListener('click', handleSingleNoteDOMClick);
+        } else if (gameMode === 'findAll') {
+            fret.addEventListener('click', handleFindAllDOMClick);
+        } else if (gameMode === 'triads') {
+            fret.addEventListener('click', handleTriadDOMClick);
+        }
+    });
+
+    updateCSSFretboardRotation();
+    initCSSRotationControls();
+}
+
+/* ========================================
+   OLD HTML RENDERING (kept for reference, can be removed later)
+   ======================================== */
 function renderFretboard(highlightedPositions = []) {
     let fretboardHTML = '<div class="fretboard">';
 
@@ -274,25 +604,30 @@ function renderSingleNoteGame() {
                 <div class="target-note">${state.targetNote}</div>
                 <div class="score">Score: ${state.score}</div>
             </div>
-            <div class="fretboard-container">
-                ${renderFretboard([])}
-            </div>
+            <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
         state.currentScreen = 'menu';
+        cleanupThreeJS();
         renderMenu();
     });
 
-    // Add click listeners to frets
-    document.querySelectorAll('.fret').forEach(fret => {
-        fret.addEventListener('click', handleSingleNoteFretClick);
-    });
-
-    // Initialize 3D rotation controls
-    updateFretboardRotation();
-    initRotationControls();
+    // Initialize Three.js and load model
+    const container = document.getElementById('threeContainer');
+    if (initThreeJS(container)) {
+        loadGuitarModel().then(() => {
+            setupFretClickHandler();
+        }).catch(error => {
+            console.error('Failed to load guitar model:', error);
+            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+            fallbackToCSS(container, 'singleNote');
+        });
+    } else {
+        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+        fallbackToCSS(container, 'singleNote');
+    }
 }
 
 function renderFindAllGame() {
@@ -310,25 +645,30 @@ function renderFindAllGame() {
                 </div>
                 <div class="score">Score: ${state.score}</div>
             </div>
-            <div class="fretboard-container">
-                ${renderFretboard(state.foundPositions)}
-            </div>
+            <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
         state.currentScreen = 'menu';
+        cleanupThreeJS();
         renderMenu();
     });
 
-    // Add click listeners to frets
-    document.querySelectorAll('.fret').forEach(fret => {
-        fret.addEventListener('click', handleFindAllFretClick);
-    });
-
-    // Initialize 3D rotation controls
-    updateFretboardRotation();
-    initRotationControls();
+    // Initialize Three.js and load model
+    const container = document.getElementById('threeContainer');
+    if (initThreeJS(container)) {
+        loadGuitarModel().then(() => {
+            setupFretClickHandler();
+        }).catch(error => {
+            console.error('Failed to load guitar model:', error);
+            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+            fallbackToCSS(container, 'findAll');
+        });
+    } else {
+        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+        fallbackToCSS(container, 'findAll');
+    }
 }
 
 /* ========================================
@@ -348,21 +688,29 @@ function startFindAllGame() {
     renderFindAllGame();
 }
 
-function handleSingleNoteFretClick(event) {
-    const fret = event.currentTarget;
-    const stringIndex = parseInt(fret.dataset.string);
-    const fretIndex = parseInt(fret.dataset.fret);
-
-    const clickedNote = getNoteAt(stringIndex, fretIndex);
+/* ========================================
+   THREE.JS CLICK HANDLERS
+   ======================================== */
+function handleSingleNoteClick(stringIndex, fretIndex, note) {
     const frequency = getFrequencyAt(stringIndex, fretIndex);
 
     // Play sound
     playGuitarTone(frequency);
 
-    if (clickedNote === state.targetNote) {
-        // Correct answer
-        fret.classList.add('highlighted');
-        fret.innerHTML = `<div class="note-marker found">${clickedNote}</div>`;
+    if (note === state.targetNote) {
+        // Correct answer - highlight the zone temporarily
+        const zone = fretZones.find(z =>
+            z.userData.stringIndex === stringIndex &&
+            z.userData.fretIndex === fretIndex
+        );
+        if (zone) {
+            zone.material.opacity = 0.5;
+            zone.material.color.setHex(0x00ff00);
+            setTimeout(() => {
+                zone.material.opacity = 0;
+            }, 1500);
+        }
+
         showFeedback('success', 'Correct! Great job!');
         state.score += 1;
 
@@ -372,19 +720,15 @@ function handleSingleNoteFretClick(event) {
         // Auto-advance to next note
         setTimeout(() => {
             state.targetNote = getRandomNote();
-            renderSingleNoteGame();
+            document.querySelector('.target-note').textContent = state.targetNote;
         }, 1500);
     } else {
         // Wrong answer
-        showFeedback('error', `Incorrect. That was ${clickedNote}. Try again!`);
+        showFeedback('error', `Incorrect. That was ${note}. Try again!`);
     }
 }
 
-function handleFindAllFretClick(event) {
-    const fret = event.currentTarget;
-    const stringIndex = parseInt(fret.dataset.string);
-    const fretIndex = parseInt(fret.dataset.fret);
-
+function handleFindAllClick(stringIndex, fretIndex, note) {
     // Check if already found
     const alreadyFound = state.foundPositions.some(
         pos => pos.string === stringIndex && pos.fret === fretIndex
@@ -394,40 +738,113 @@ function handleFindAllFretClick(event) {
         return; // Already clicked this position
     }
 
-    const clickedNote = getNoteAt(stringIndex, fretIndex);
     const frequency = getFrequencyAt(stringIndex, fretIndex);
-
-    // Play sound
     playGuitarTone(frequency);
 
-    if (clickedNote === state.targetNote) {
+    if (note === state.targetNote) {
         // Correct position
         state.foundPositions.push({ string: stringIndex, fret: fretIndex });
+
+        // Highlight the zone permanently
+        const zone = fretZones.find(z =>
+            z.userData.stringIndex === stringIndex &&
+            z.userData.fretIndex === fretIndex
+        );
+        if (zone) {
+            zone.material.opacity = 0.7;
+            zone.material.color.setHex(0x00e676);
+        }
 
         const remaining = state.allPositions.length - state.foundPositions.length;
 
         if (remaining > 0) {
             showFeedback('success', `Good! ${remaining} more to go.`);
-            renderFindAllGame();
+            document.querySelector('.progress-info').textContent = `Found: ${state.foundPositions.length} / ${state.allPositions.length}`;
         } else {
             // All found!
-            renderFindAllGame();
             showFeedback('success', `Awesome! You found all ${state.targetNote}'s!`);
             state.score += 10;
+            document.querySelector('.score').textContent = `Score: ${state.score}`;
 
             // Auto-advance to next note
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
                 state.foundPositions = [];
-                renderFindAllGame();
+
+                // Reset all zones
+                fretZones.forEach(z => z.material.opacity = 0);
+
+                document.querySelector('.target-note').textContent = state.targetNote;
+                document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
             }, 2000);
         }
     } else {
         // Wrong position
-        showFeedback('error', `Oops, that's a ${clickedNote}. Keep looking for ${state.targetNote}.`);
+        showFeedback('error', `Oops, that's a ${note}. Keep looking for ${state.targetNote}.`);
     }
 }
+
+function handleTriadClick(stringIndex, fretIndex, note) {
+    const frequency = getFrequencyAt(stringIndex, fretIndex);
+    playGuitarTone(frequency);
+
+    const triad = state.targetTriad;
+
+    // Check if this note is part of the triad
+    if (triad.notes.includes(note)) {
+        // Check if we already clicked this note
+        if (!state.clickedTriadNotes.includes(note)) {
+            state.clickedTriadNotes.push(note);
+            state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
+
+            // Highlight the zone
+            const zone = fretZones.find(z =>
+                z.userData.stringIndex === stringIndex &&
+                z.userData.fretIndex === fretIndex
+            );
+            if (zone) {
+                zone.material.opacity = 0.7;
+                zone.material.color.setHex(0x00e676);
+            }
+
+            // Check if all notes are clicked
+            if (state.clickedTriadNotes.length === 3) {
+                // All notes found!
+                showFeedback('success', 'Perfect! All notes found!');
+                state.score += 1;
+                document.querySelector('.score').textContent = `Score: ${state.score}`;
+
+                // Auto-advance to next triad
+                setTimeout(() => {
+                    state.targetTriad = getRandomTriad();
+                    state.clickedTriadNotes = [];
+                    state.clickedTriadPositions = [];
+
+                    // Reset all zones
+                    fretZones.forEach(z => z.material.opacity = 0);
+
+                    // Update UI (we need to re-render the triad display)
+                    renderTriadsGameUpdate();
+                }, 2000);
+            } else {
+                const remaining = 3 - state.clickedTriadNotes.length;
+                showFeedback('success', `Good! ${remaining} more note${remaining > 1 ? 's' : ''} to go.`);
+                renderTriadsGameUpdate();
+            }
+        } else {
+            // Note already clicked
+            showFeedback('error', `You already found ${note}.`);
+        }
+    } else {
+        // Wrong note
+        showFeedback('error', `That's ${note}, not part of the ${triad.root} ${triad.typeName} triad.`);
+    }
+}
+
+
+
+
 
 function startTriadsGame() {
     state.currentScreen = 'triadsSettings';
@@ -534,57 +951,144 @@ function renderTriadsGame() {
                 </div>
                 <div class="score">Score: ${state.score}</div>
             </div>
-            <div class="fretboard-container">
-                ${renderFretboard(state.clickedTriadPositions)}
-            </div>
+            <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
         state.currentScreen = 'menu';
+        cleanupThreeJS();
         renderMenu();
     });
 
-    // Add click listeners to frets
-    document.querySelectorAll('.fret').forEach(fret => {
-        fret.addEventListener('click', handleTriadFretClick);
-    });
-
-    // Initialize 3D rotation controls
-    updateFretboardRotation();
-    initRotationControls();
+    // Initialize Three.js and load model
+    const container = document.getElementById('threeContainer');
+    if (initThreeJS(container)) {
+        loadGuitarModel().then(() => {
+            setupFretClickHandler();
+        }).catch(error => {
+            console.error('Failed to load guitar model:', error);
+            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+            fallbackToCSS(container, 'triads');
+        });
+    } else {
+        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+        fallbackToCSS(container, 'triads');
+    }
 }
 
-function handleTriadFretClick(event) {
+function renderTriadsGameUpdate() {
+    const triad = state.targetTriad;
+
+    // Determine which notes have been clicked
+    const noteProgress = triad.notes.map(note => {
+        const isClicked = state.clickedTriadNotes.includes(note);
+        return { note, isClicked };
+    });
+
+    // Update the notes display
+    const notesContainer = document.querySelector('.triad-notes');
+    if (notesContainer) {
+        notesContainer.innerHTML = noteProgress.map(({ note, isClicked }) => `
+            <span class="triad-note ${isClicked ? 'clicked' : ''}">${note}</span>
+        `).join('');
+    }
+
+    // Update title if changed (new round)
+    const titleEl = document.querySelector('.triad-title');
+    if (titleEl) {
+        titleEl.textContent = `${triad.root} ${triad.typeName}`;
+    }
+}
+
+
+
+
+
+/* ========================================
+   FALLBACK DOM EVENT HANDLERS
+   ======================================== */
+function handleSingleNoteDOMClick(event) {
+    const fret = event.currentTarget;
+    const stringIndex = parseInt(fret.dataset.string);
+    const fretIndex = parseInt(fret.dataset.fret);
+    const clickedNote = getNoteAt(stringIndex, fretIndex);
+    const frequency = getFrequencyAt(stringIndex, fretIndex);
+
+    playGuitarTone(frequency);
+
+    if (clickedNote === state.targetNote) {
+        fret.classList.add('highlighted');
+        fret.innerHTML = `<div class="note-marker found">${clickedNote}</div>`;
+        showFeedback('success', 'Correct! Great job!');
+        state.score += 1;
+        document.querySelector('.score').textContent = `Score: ${state.score}`;
+
+        setTimeout(() => {
+            state.targetNote = getRandomNote();
+            renderSingleNoteGame();
+        }, 1500);
+    } else {
+        showFeedback('error', `Incorrect. That was ${clickedNote}. Try again!`);
+    }
+}
+
+function handleFindAllDOMClick(event) {
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
 
+    // Check if already found
+    const alreadyFound = state.foundPositions.some(
+        pos => pos.string === stringIndex && pos.fret === fretIndex
+    );
+    if (alreadyFound) return;
+
+    const clickedNote = getNoteAt(stringIndex, fretIndex);
+    const frequency = getFrequencyAt(stringIndex, fretIndex);
+    playGuitarTone(frequency);
+
+    if (clickedNote === state.targetNote) {
+        state.foundPositions.push({ string: stringIndex, fret: fretIndex });
+        const remaining = state.allPositions.length - state.foundPositions.length;
+
+        if (remaining > 0) {
+            showFeedback('success', `Good! ${remaining} more to go.`);
+            renderFindAllGame();
+        } else {
+            renderFindAllGame();
+            showFeedback('success', `Awesome! You found all ${state.targetNote}'s!`);
+            state.score += 10;
+            setTimeout(() => {
+                state.targetNote = getRandomNote();
+                state.allPositions = getAllPositions(state.targetNote);
+                state.foundPositions = [];
+                renderFindAllGame();
+            }, 2000);
+        }
+    } else {
+        showFeedback('error', `Oops, that's a ${clickedNote}. Keep looking for ${state.targetNote}.`);
+    }
+}
+
+function handleTriadDOMClick(event) {
+    const fret = event.currentTarget;
+    const stringIndex = parseInt(fret.dataset.string);
+    const fretIndex = parseInt(fret.dataset.fret);
     const clickedNote = getNoteAt(stringIndex, fretIndex);
     const frequency = getFrequencyAt(stringIndex, fretIndex);
 
-    // Play sound
     playGuitarTone(frequency);
 
     const triad = state.targetTriad;
-
-    // Check if this note is part of the triad
     if (triad.notes.includes(clickedNote)) {
-        // Check if we already clicked this note
         if (!state.clickedTriadNotes.includes(clickedNote)) {
             state.clickedTriadNotes.push(clickedNote);
-
-            // Check if all notes are clicked
             if (state.clickedTriadNotes.length === 3) {
-                // All notes found!
                 state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
                 showFeedback('success', 'Perfect! All notes found!');
                 state.score += 1;
-
-                // Show the completed state
                 renderTriadsGame();
-
-                // Auto-advance to next triad
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
@@ -598,65 +1102,54 @@ function handleTriadFretClick(event) {
                 renderTriadsGame();
             }
         } else {
-            // Note already clicked
             showFeedback('error', `You already found ${clickedNote}.`);
         }
     } else {
-        // Wrong note
         showFeedback('error', `That's ${clickedNote}, not part of the ${triad.root} ${triad.typeName} triad.`);
     }
 }
 
 /* ========================================
-   3D ROTATION CONTROLS
+   CSS ROTATION CONTROLS (Fallback)
    ======================================== */
-let isDragging = false;
-let lastMouseX = 0;
-let lastMouseY = 0;
+let isDraggingCSS = false;
+let lastMouseXCSS = 0;
+let lastMouseYCSS = 0;
 
-function updateFretboardRotation() {
+function updateCSSFretboardRotation() {
     const fretboard = document.querySelector('.fretboard');
     if (fretboard) {
         fretboard.style.transform = `rotateX(${state.rotation.x}deg) rotateY(${state.rotation.y}deg)`;
     }
 }
 
-function initRotationControls() {
+function initCSSRotationControls() {
     const fretboardContainer = document.querySelector('.fretboard-container');
     if (!fretboardContainer) return;
 
     fretboardContainer.addEventListener('mousedown', (e) => {
-        // Don't start dragging if clicking on a fret
         if (e.target.closest('.fret')) return;
-
-        isDragging = true;
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+        isDraggingCSS = true;
+        lastMouseXCSS = e.clientX;
+        lastMouseYCSS = e.clientY;
         fretboardContainer.style.cursor = 'grabbing';
     });
 
     document.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-
-        const deltaX = e.clientX - lastMouseX;
-        const deltaY = e.clientY - lastMouseY;
-
-        // Update rotation (Y axis for horizontal movement, X axis for vertical movement)
+        if (!isDraggingCSS) return;
+        const deltaX = e.clientX - lastMouseXCSS;
+        const deltaY = e.clientY - lastMouseYCSS;
         state.rotation.y += deltaX * 0.5;
         state.rotation.x -= deltaY * 0.5;
-
-        // Clamp X rotation to prevent flipping
         state.rotation.x = Math.max(-60, Math.min(80, state.rotation.x));
-
-        updateFretboardRotation();
-
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+        updateCSSFretboardRotation();
+        lastMouseXCSS = e.clientX;
+        lastMouseYCSS = e.clientY;
     });
 
     document.addEventListener('mouseup', () => {
-        if (isDragging) {
-            isDragging = false;
+        if (isDraggingCSS) {
+            isDraggingCSS = false;
             const fretboardContainer = document.querySelector('.fretboard-container');
             if (fretboardContainer) {
                 fretboardContainer.style.cursor = 'grab';
