@@ -1084,24 +1084,27 @@ function fallbackToCSS(container, gameMode) {
 function renderFretboard(highlightedPositions = []) {
     let fretboardHTML = '<div class="fretboard">';
 
-    // Add fret marker dots
+    // Add fret marker dots - place them in the same flex structure as fret numbers
+    // Markers go in the middle of specific fret spaces (between frets)
     fretboardHTML += '<div class="fret-markers">';
     const markerFrets = [3, 5, 7, 9, 12];
-    const displayedFrets = NUM_FRETS - 1; // 12 frets (1-12)
-
-    markerFrets.forEach(fret => {
-        // Calculate position based on 12 displayed frets (starting at fret 1)
-        // Fret 3 is at index 2 (0, 1, 2)
-        const leftPercent = ((fret - 1 + 0.5) / displayedFrets) * 100;
-
-        if (fret === 12) {
-            // Double dots for 12th fret
-            fretboardHTML += `<div class="fret-marker-dot" style="left: ${leftPercent}%; top: 35%"></div>`;
-            fretboardHTML += `<div class="fret-marker-dot" style="left: ${leftPercent}%; top: 65%"></div>`;
+    
+    // Create a flex container matching the fret layout
+    fretboardHTML += '<div class="fret-markers-container">';
+    for (let i = 1; i < NUM_FRETS; i++) {
+        if (markerFrets.includes(i)) {
+            if (i === 12) {
+                // Double dots for 12th fret
+                fretboardHTML += `<div class="fret-marker-space"><div class="fret-marker-dot" style="top: 35%"></div><div class="fret-marker-dot" style="top: 65%"></div></div>`;
+            } else {
+                fretboardHTML += `<div class="fret-marker-space"><div class="fret-marker-dot"></div></div>`;
+            }
         } else {
-            fretboardHTML += `<div class="fret-marker-dot" style="left: ${leftPercent}%"></div>`;
+            // Empty space for frets without markers
+            fretboardHTML += '<div class="fret-marker-space"></div>';
         }
-    });
+    }
+    fretboardHTML += '</div>';
     fretboardHTML += '</div>';
 
     fretboardHTML += '<div class="strings-container">';
