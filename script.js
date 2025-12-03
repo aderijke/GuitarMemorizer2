@@ -23,6 +23,8 @@ const state = {
     score: 0,
     foundPositions: [],
     allPositions: [],
+    // View mode: '3d' or '2d'
+    viewMode: '3d',
     // Triads mode
     targetTriad: null,
     clickedTriadNotes: [],
@@ -176,6 +178,18 @@ function renderMenu() {
         <div class="menu-screen">
             <h1 class="title">Guitar Fretboard Memorizer</h1>
             <p class="subtitle">Master the neck, one note at a time.</p>
+            <div class="view-toggle-container">
+                <label class="view-toggle-label">
+                    <span class="view-toggle-text">View Mode:</span>
+                    <div class="view-toggle-switch">
+                        <input type="checkbox" id="viewModeToggle" ${state.viewMode === '3d' ? 'checked' : ''}>
+                        <span class="toggle-slider">
+                            <span class="toggle-label-left">2D</span>
+                            <span class="toggle-label-right">3D</span>
+                        </span>
+                    </div>
+                </label>
+            </div>
             <div class="mode-cards">
                 <div class="mode-card" id="singleNoteMode">
                     <h2>Single Note</h2>
@@ -192,6 +206,13 @@ function renderMenu() {
             </div>
         </div>
     `;
+
+    // Setup view mode toggle
+    const viewToggle = document.getElementById('viewModeToggle');
+    viewToggle.addEventListener('change', (e) => {
+        state.viewMode = e.target.checked ? '3d' : '2d';
+        console.log(`View mode changed to: ${state.viewMode}`);
+    });
 
     document.getElementById('singleNoteMode').addEventListener('click', startSingleNoteGame);
     document.getElementById('findAllMode').addEventListener('click', startFindAllGame);
@@ -255,8 +276,9 @@ function initThreeJS(container) {
         controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
-        controls.minDistance = 0.5;
-        controls.maxDistance = 8;
+        controls.minDistance = 0.1; // Closer zoom for better fret visibility
+        controls.maxDistance = 10; // Further zoom out
+        controls.zoomSpeed = 1.2; // Faster zoom speed
         controls.maxPolarAngle = Math.PI / 1.5;
         controls.target.set(0, 0, 0);
         controls.update();
@@ -365,49 +387,596 @@ function loadGuitarModel() {
     });
 }
 
+function findNeckRegion() {
+    if (!guitarModel) return null;
+
+    // Calculate overall bounding box
+    const overallBox = new THREE.Box3().setFromObject(guitarModel);
+    const overallSize = overallBox.getSize(new THREE.Vector3());
+    const overallCenter = overallBox.getCenter(new THREE.Vector3());
+    const overallMin = overallBox.min;
+    const overallMax = overallBox.max;
+
+    // For a guitar model rotated 90 degrees on Y axis:
+    // - X axis: length (headstock to body)
+    // - Y axis: height (top to bottom)
+    // - Z axis: width (side to side)
+    
+    // The neck typically:
+    // - Starts near the headstock (left/most negative X) at the nut
+    // - Extends about 60-70% of the model length
+    // - Is narrow in Z (about 5-10% of model width)
+    // - Is centered in Z
+    // - Is at a specific Y level (around the middle, slightly above center)
+    
+    // More conservative estimates based on typical guitar proportions
+    const neckLength = overallSize.x * 0.65; // Neck is about 65% of model length
+    const neckWidth = overallSize.z * 0.12; // Neck is narrow in Z (about 12% of width)
+    
+    // Neck starts from the nut position (where fret 0 would be)
+    // The nut is typically at the junction of headstock and neck
+    // Start a bit further in from the left edge to account for headstock
+    const nutX = overallMin.x + overallSize.x * 0.15; // Nut position (fret 0)
+    const neckStartX = nutX; // First fret starts just after the nut
+    const neckCenterZ = overallCenter.z; // Centered in Z
+    const neckY = overallCenter.y - overallSize.y * 0.1; // Slightly below center (fretboard is on top of neck)
+
+    return {
+        startX: neckStartX,
+        nutX: nutX, // Store nut position separately
+        length: neckLength,
+        centerZ: neckCenterZ,
+        width: neckWidth,
+        y: neckY,
+        overallBox: overallBox
+    };
+}
+
+function findFretPositionsUsingRaycasting(neckRegion) {
+    if (!neckRegion || !guitarModel) return null;
+
+    const fretPositions = [];
+    const raycaster = new THREE.Raycaster();
+    
+    // Get all meshes for raycasting
+    const meshes = [];
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+            meshes.push(child);
+        }
+    });
+
+    // Calculate fret positions using logarithmic spacing
+    // Use the full neck length for scale length calculation
+    const scaleLength = neckRegion.length * 0.9;
+    const nutX = neckRegion.nutX || neckRegion.startX;
+    
+    // For each fret (1-12), calculate position from the nut
+    for (let fret = 1; fret < NUM_FRETS; fret++) {
+        // Logarithmic fret spacing formula: distance = scaleLength * (1 - 2^(-fret/12))
+        const distanceFromNut = scaleLength * (1 - Math.pow(2, -fret / 12));
+        const fretX = nutX + distanceFromNut;
+        
+        // Cast a ray from above the model down to find the fretboard surface
+        // Cast at the center of the neck width
+        const rayOrigin = new THREE.Vector3(fretX, neckRegion.y + 0.5, neckRegion.centerZ);
+        const rayDirection = new THREE.Vector3(0, -1, 0);
+        
+        raycaster.set(rayOrigin, rayDirection);
+        const intersects = raycaster.intersectObjects(meshes, false);
+        
+        let bestY = neckRegion.y;
+        if (intersects.length > 0) {
+            // Use the first intersection (closest surface)
+            bestY = intersects[0].point.y;
+        }
+
+        fretPositions.push({
+            x: fretX,
+            y: bestY,
+            z: neckRegion.centerZ
+        });
+    }
+
+    console.log(`Found ${fretPositions.length} fret positions, starting at X=${fretPositions[0]?.x.toFixed(3)} (fret 1)`);
+    return fretPositions;
+}
+
+function analyzeGuitarModel() {
+    if (!guitarModel) return null;
+
+    // First, find the neck region
+    const neckRegion = findNeckRegion();
+    if (!neckRegion) return null;
+
+    // Find fret positions using raycasting
+    let fretPositions = findFretPositionsUsingRaycasting(neckRegion);
+    
+    if (!fretPositions || fretPositions.length === 0) {
+        // Fallback to simple calculation
+        const scaleLength = neckRegion.length * 0.9;
+        const nutX = neckRegion.nutX || neckRegion.startX;
+        fretPositions = [];
+        
+        for (let fret = 1; fret < NUM_FRETS; fret++) {
+            const distanceFromNut = scaleLength * (1 - Math.pow(2, -fret / 12));
+            fretPositions.push({
+                x: nutX + distanceFromNut,
+                y: neckRegion.y,
+                z: neckRegion.centerZ
+            });
+        }
+    }
+
+    // Calculate string positions (evenly spaced across the neck width)
+    // Ensure we have exactly 6 strings
+    const stringPositions = [];
+    
+    // Use the actual model bounding box to determine the Z range
+    const overallBox = neckRegion.overallBox;
+    const zMin = overallBox.min.z;
+    const zMax = overallBox.max.z;
+    const zCenter = (zMin + zMax) / 2;
+    const zRange = zMax - zMin;
+    
+    // Try to find string-like objects in the model first
+    const stringMeshes = [];
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+            const childBox = new THREE.Box3().setFromObject(child);
+            const childSize = childBox.getSize(new THREE.Vector3());
+            const childCenter = childBox.getCenter(new THREE.Vector3());
+            
+            // Look for thin, long objects that could be strings
+            // Strings are typically very thin in one dimension and long in another
+            const maxDim = Math.max(childSize.x, childSize.y, childSize.z);
+            const minDim = Math.min(childSize.x, childSize.y, childSize.z);
+            
+            // Check if it's a thin, long object (could be a string)
+            if (minDim < 0.01 && maxDim > 1.0) {
+                // Check if it's in the neck region (X axis) and centered in Y
+                if (childCenter.x >= neckRegion.startX && childCenter.x <= neckRegion.startX + neckRegion.length) {
+                    stringMeshes.push({
+                        z: childCenter.z,
+                        mesh: child
+                    });
+                }
+            }
+        }
+    });
+    
+    // If we found string-like objects, use them
+    if (stringMeshes.length >= 4) {
+        // ... (existing code for string meshes) ...
+        // Sort by Z position
+        stringMeshes.sort((a, b) => a.z - b.z);
+        // ...
+    } else {
+        // Fallback: Use raycasting to measure the actual neck width
+        // First, get all meshes for raycasting
+        const meshes = [];
+        guitarModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                meshes.push(child);
+            }
+        });
+        
+        // Scan across the Z axis at a middle fret position
+        const scanX = neckRegion.startX + neckRegion.length * 0.4; // Around 5th-7th fret
+        const scanY = neckRegion.y + 1.0; // Start ray above
+        
+        let minZ = zCenter;
+        let maxZ = zCenter;
+        let foundNeck = false;
+        
+        const raycaster = new THREE.Raycaster();
+        const dir = new THREE.Vector3(0, -1, 0);
+        const steps = 50;
+        const scanWidth = zRange * 0.8; // Scan 80% of total width
+        const stepSize = scanWidth / steps;
+        
+        // Scan for min Z (left edge)
+        for (let z = zCenter; z > zCenter - scanWidth/2; z -= stepSize) {
+            raycaster.set(new THREE.Vector3(scanX, scanY, z), dir);
+            if (raycaster.intersectObjects(meshes, false).length > 0) {
+                minZ = z;
+                foundNeck = true;
+            } else if (foundNeck) {
+                // Edge found
+                break;
+            }
+        }
+        
+        // Scan for max Z (right edge)
+        foundNeck = false; // Reset for right scan
+        for (let z = zCenter; z < zCenter + scanWidth/2; z += stepSize) {
+            raycaster.set(new THREE.Vector3(scanX, scanY, z), dir);
+            if (raycaster.intersectObjects(meshes, false).length > 0) {
+                maxZ = z;
+                foundNeck = true;
+            } else if (foundNeck) {
+                // Edge found
+                break;
+            }
+        }
+        
+        const measuredNeckWidth = maxZ - minZ;
+        
+        if (measuredNeckWidth > 0.1) {
+            console.log(`Measured neck width via raycasting: ${measuredNeckWidth.toFixed(3)} (from ${minZ.toFixed(3)} to ${maxZ.toFixed(3)})`);
+            
+            // Apply margins - strings don't go to the very edge of the neck
+            const margin = measuredNeckWidth * 0.10; // 10% margin on each side
+            const usableWidth = measuredNeckWidth - (2 * margin);
+            const startZ = minZ + margin;
+            
+            const stringSpacing = usableWidth / (STRING_TUNING.length - 1);
+            
+            for (let i = 0; i < STRING_TUNING.length; i++) {
+                stringPositions.push(startZ + (i * stringSpacing));
+            }
+        } else {
+            // Fallback to estimation if measurement failed
+            console.warn("Neck measurement failed, using fallback estimation");
+            const estimatedNeckWidth = zRange * 0.38;
+            const estimatedNeckMinZ = zCenter - estimatedNeckWidth / 2;
+            const stringSpacing = estimatedNeckWidth / (STRING_TUNING.length - 1);
+            
+            for (let i = 0; i < STRING_TUNING.length; i++) {
+                const stringZ = estimatedNeckMinZ + (i * stringSpacing);
+                stringPositions.push(stringZ);
+            }
+        }
+    }
+
+    console.log(`Calculated ${stringPositions.length} string positions for ${STRING_TUNING.length} strings:`, stringPositions.map(p => p.toFixed(3)));
+    console.log(`Model Z range: ${zMin.toFixed(3)} to ${zMax.toFixed(3)}, total width: ${zRange.toFixed(3)}`);
+    console.log(`String positions range: ${Math.min(...stringPositions).toFixed(3)} to ${Math.max(...stringPositions).toFixed(3)}`);
+
+    return {
+        fretPositions: fretPositions,
+        stringPositions: stringPositions,
+        neckBox: neckRegion.overallBox,
+        neckCenter: new THREE.Vector3(neckRegion.startX + neckRegion.length / 2, neckRegion.y, neckRegion.centerZ),
+        neckSize: new THREE.Vector3(neckRegion.length, 0.1, neckRegion.width),
+        neckAxis: 'x',
+        stringAxis: 'z',
+        neckRegion: neckRegion // Include full neck region for taper calculation
+    };
+}
+
 function createFretZones() {
     // Clear existing zones
     fretZones.forEach(zone => scene.remove(zone));
     fretZones = [];
 
-    // Create invisible clickable zones for each fret/string combination
-    // These positions will need to be calibrated based on the actual model
-    const stringSpacing = 0.05; // Spacing between strings
-    const fretSpacing = 0.20; // Approximate spacing between frets
-    const neckStartZ = -2.8; // Start at headstock (left side)
-    const neckStartY = -0.49; // Y position of strings (adjusted to be between -0.45 and -0.65)
-    const slope = 0.014; // Correction for neck angle
+    // Analyze the model to get fret and string positions
+    const analysis = analyzeGuitarModel();
+    
+    if (!analysis) {
+        console.warn('Could not analyze guitar model, using fallback positions');
+        // Fallback to old hardcoded positions
+        const stringSpacing = 0.05;
+        const fretSpacing = 0.20;
+        const neckStartZ = -2.8;
+        const neckStartY = -0.49;
+        const slope = 0.014;
 
+        for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
+            for (let fretIndex = 1; fretIndex < NUM_FRETS; fretIndex++) {
+                // Calculate position first to determine exact box width
+                const fretX = neckStartZ + (fretIndex * fretSpacing);
+                let centerX = fretX;
+                let boxWidth = fretSpacing; // Default to fret spacing
+                
+                if (fretIndex < NUM_FRETS - 1) {
+                    // Center exactly between current and next fret
+                    const nextFretX = neckStartZ + ((fretIndex + 1) * fretSpacing);
+                    centerX = (fretX + nextFretX) / 2;
+                    boxWidth = nextFretX - fretX; // Exact distance between frets
+                } else if (fretIndex > 1) {
+                    // Last fret - center between previous and current
+                    const prevFretX = neckStartZ + ((fretIndex - 1) * fretSpacing);
+                    centerX = (fretX + prevFretX) / 2;
+                    boxWidth = fretX - prevFretX; // Exact distance between frets
+                }
+                
+                // Create box geometry for fret hitbox
+                // Width: exact distance between frets
+                // Height: small height above fretboard
+                const boxHeight = 0.08;
+                // Depth: slightly wider than a string (not the space between strings)
+                const boxDepth = Math.min(stringSpacing * 0.3, 0.02); // Max 30% of string spacing or 0.02
+                
+                const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
+                const material = new THREE.MeshBasicMaterial({
+                    color: 0xff0000,
+                    transparent: true,
+                    opacity: 0.5
+                });
+
+                const zone = new THREE.Mesh(geometry, material);
+                zone.position.x = centerX;
+                zone.position.y = neckStartY + (fretIndex * slope);
+                // Position exactly on the string
+                zone.position.z = (stringIndex - 2.5) * stringSpacing;
+
+                zone.userData = {
+                    stringIndex,
+                    fretIndex,
+                    note: getNoteAt(stringIndex, fretIndex)
+                };
+
+                scene.add(zone);
+                fretZones.push(zone);
+            }
+        }
+        return;
+    }
+
+    // Use analyzed positions
+    const { fretPositions, stringPositions, neckAxis, stringAxis, neckRegion } = analysis;
+
+    // Get all meshes for raycasting validation
+    const meshes = [];
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+            meshes.push(child);
+        }
+    });
+
+    // Get overall bounding box once for validation
+    const overallBox = new THREE.Box3().setFromObject(guitarModel);
+    
+    const raycaster = new THREE.Raycaster();
+
+    // Create hitboxes at the intersection of each fret and string
+    // Ensure we loop through all 6 strings
+    console.log(`Creating hitboxes for ${STRING_TUNING.length} strings and ${fretPositions.length} frets`);
+    
     for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
-        for (let fretIndex = 1; fretIndex < NUM_FRETS; fretIndex++) {
-            const geometry = new THREE.SphereGeometry(0.03, 8, 8); // Slightly larger for easier clicking
+        let hitboxesForThisString = 0;
+        
+        for (let fretIndex = 0; fretIndex < fretPositions.length && fretIndex < NUM_FRETS - 1; fretIndex++) {
+            const fretPos = fretPositions[fretIndex];
+            
+            // Ensure we have a valid string position for this string index
+            if (stringIndex >= stringPositions.length) {
+                console.warn(`String index ${stringIndex} out of range (${stringPositions.length} positions available)`);
+                continue;
+            }
+            
+            const stringPos = stringPositions[stringIndex];
+
+            // Calculate position: exactly on the string, exactly between two frets
+            // First, determine the X position (fret position) - exactly between this fret and next
+            let posX;
+            let fretStartX, fretEndX;
+            
+            if (fretIndex < fretPositions.length - 1) {
+                // Center exactly between this fret and the next fret
+                fretStartX = fretPositions[fretIndex].x;
+                fretEndX = fretPositions[fretIndex + 1].x;
+                posX = (fretStartX + fretEndX) / 2; // Exact center between frets
+            } else if (fretIndex > 0) {
+                // Last fret - center between previous and current fret
+                fretStartX = fretPositions[fretIndex - 1].x;
+                fretEndX = fretPositions[fretIndex].x;
+                posX = (fretStartX + fretEndX) / 2; // Exact center between frets
+            } else {
+                // First fret - use position between nut and first fret
+                const nutX = neckRegion.nutX || neckRegion.startX;
+                fretStartX = nutX;
+                fretEndX = fretPositions[0].x;
+                posX = (fretStartX + fretEndX) / 2; // Center between nut and first fret
+            }
+            
+            // Calculate string position at this specific fret position
+            // Strings taper (converge) as they go from nut to body
+            // We need to interpolate the string Z position based on the X position (fret position)
+            
+            // Get the neck region for interpolation
+            const neckStartX = neckRegion.startX; // Nut position (fret 0)
+            const neckEndX = neckRegion.startX + neckRegion.length; // End of neck (around fret 12)
+            const neckLength = neckEndX - neckStartX;
+            
+            // Calculate taper: strings are wider at the nut, narrower at the body
+            // Use the string positions at the nut (start) and interpolate to narrower at the end
+            const nutZMin = stringPositions[0]; // First string at nut
+            const nutZMax = stringPositions[stringPositions.length - 1]; // Last string at nut
+            const nutWidth = nutZMax - nutZMin;
+            
+            // Estimate body width (typically 15-20% narrower than nut)
+            const taperRatio = 0.85; // Strings are 85% of nut width at body
+            const bodyWidth = nutWidth * taperRatio;
+            const bodyZCenter = (nutZMin + nutZMax) / 2; // Center stays the same
+            const bodyZMin = bodyZCenter - bodyWidth / 2;
+            const bodyZMax = bodyZCenter + bodyWidth / 2;
+            
+            // Interpolate based on X position (how far along the neck)
+            const progress = (posX - neckStartX) / neckLength; // 0 at nut, 1 at body
+            const clampedProgress = Math.max(0, Math.min(1, progress)); // Clamp between 0 and 1
+            
+            // Interpolate string positions at this fret
+            const currentZMin = nutZMin + (bodyZMin - nutZMin) * clampedProgress;
+            const currentZMax = nutZMax + (bodyZMax - nutZMax) * clampedProgress;
+            const currentWidth = currentZMax - currentZMin;
+            
+            // Calculate this string's Z position based on its index at this specific fret
+            const stringSpacing = currentWidth / (STRING_TUNING.length - 1);
+            const stringZ = currentZMin + (stringIndex * stringSpacing);
+            
+            // Position exactly on the string (Z position for strings running along Z axis)
+            let posY = fretPos.y; // Start with fretboard Y position
+            let posZ = stringZ; // Use interpolated string position at this fret
+            
+            // Ensure we're using the correct axis
+            if (stringAxis === 'z') {
+                posZ = stringZ; // Interpolated string position (Z axis)
+            } else if (stringAxis === 'y') {
+                posY = stringZ; // Interpolated string position (Y axis)
+            } else {
+                posX = stringZ; // Interpolated string position (X axis)
+            }
+            
+            // Debug logging for first few hitboxes
+            if (stringIndex < 2 && fretIndex < 2) {
+                console.log(`Hitbox ${stringIndex}-${fretIndex}: fretStartX=${fretStartX.toFixed(3)}, fretEndX=${fretEndX.toFixed(3)}, posX=${posX.toFixed(3)}, stringZ=${stringZ.toFixed(3)}, posZ=${posZ.toFixed(3)}`);
+            }
+
+            // Validate position: check if it's within the model bounds and on the surface
+            // First, check if Z position is within reasonable bounds of the model
+            const modelZMin = overallBox.min.z;
+            const modelZMax = overallBox.max.z;
+            const modelZRange = modelZMax - modelZMin;
+            
+            // Use a wider valid range - 75% of model width centered on model
+            // This should allow all strings including the outer ones
+            const validZCenter = (modelZMin + modelZMax) / 2;
+            const validZWidth = modelZRange * 0.75; // 75% of model width (increased from 65%)
+            const validZMin = validZCenter - validZWidth / 2;
+            const validZMax = validZCenter + validZWidth / 2;
+            
+            if (posZ < validZMin || posZ > validZMax) {
+                // Position is outside valid range, skip this hitbox
+                continue;
+            }
+            
+            // Validate Y position by checking if it's near the model surface
+            // Try multiple raycast positions to find the surface
+            let foundValidPosition = false;
+            let finalY = posY;
+            
+            // Cast rays at the exact position and slightly offset positions
+            const rayOffsets = [
+                { x: 0, z: 0 },      // Exact position
+                { x: 0, z: 0.02 },   // Slightly right
+                { x: 0, z: -0.02 },  // Slightly left
+                { x: 0.02, z: 0 },   // Slightly forward
+                { x: -0.02, z: 0 }   // Slightly back
+            ];
+            
+            for (const offset of rayOffsets) {
+                const rayOrigin = new THREE.Vector3(posX + offset.x, posY + 0.5, posZ + offset.z);
+                const rayDirection = new THREE.Vector3(0, -1, 0);
+                raycaster.set(rayOrigin, rayDirection);
+                const intersects = raycaster.intersectObjects(meshes, false);
+
+                if (intersects.length > 0) {
+                    // Use the intersection point, but keep it slightly above the surface
+                    const surfaceY = intersects[0].point.y;
+                    const distanceFromSurface = Math.abs(posY - surfaceY);
+                    
+                    // Use a reasonable threshold (0.3 units) to validate position
+                    if (distanceFromSurface < 0.3) {
+                        finalY = surfaceY + 0.01; // Slightly above surface for better clicking
+                        foundValidPosition = true;
+                        break; // Found valid position, no need to check other offsets
+                    }
+                }
+            }
+            
+            // If we didn't find a valid position with raycasting, use the calculated Y
+            // This allows hitboxes even if raycasting misses (which can happen at edges)
+            // Always use the calculated Y position - raycasting is just for fine-tuning
+            if (!foundValidPosition) {
+                // Use calculated Y position from fret position
+                finalY = fretPos.y;
+            }
+            
+            posY = finalY;
+
+            // Calculate box dimensions
+            // Width: exact distance between the two frets (already calculated above)
+            let boxWidth;
+            
+            if (fretIndex < fretPositions.length - 1) {
+                // Between current fret and next fret
+                boxWidth = fretEndX - fretStartX; // Full distance between frets
+            } else if (fretIndex > 0) {
+                // Last fret - between previous and current fret
+                boxWidth = fretEndX - fretStartX; // Full distance between frets
+            } else {
+                // First fret - between nut and first fret
+                boxWidth = fretEndX - fretStartX; // Full distance between nut and first fret
+            }
+            
+            // Height: small height above fretboard for clicking
+            const boxHeight = 0.04;
+            
+            // Depth: very narrow, just slightly wider than a string
+            // Calculate based on string spacing at this fret position to avoid overlap
+            let boxDepth = 0.012; // Default: very narrow
+            
+            // Calculate string spacing at this fret position
+            if (stringIndex < STRING_TUNING.length - 1) {
+                // Calculate next string's Z position at this fret
+                const nextStringProgress = (posX - neckStartX) / neckLength;
+                const clampedNextProgress = Math.max(0, Math.min(1, nextStringProgress));
+                const nextStringZMin = nutZMin + (bodyZMin - nutZMin) * clampedNextProgress;
+                const nextStringZMax = nutZMax + (bodyZMax - nutZMax) * clampedNextProgress;
+                const nextStringWidth = nextStringZMax - nextStringZMin;
+                const nextStringSpacing = nextStringWidth / (STRING_TUNING.length - 1);
+                const nextStringZ = nextStringZMin + ((stringIndex + 1) * nextStringSpacing);
+                
+                // Use 30% of the distance to next string to avoid overlap
+                const distanceToNext = Math.abs(nextStringZ - posZ);
+                boxDepth = Math.min(distanceToNext * 0.3, 0.02); // Max 0.02
+            } else if (stringIndex > 0) {
+                // Last string - use distance from previous string
+                const prevStringProgress = (posX - neckStartX) / neckLength;
+                const clampedPrevProgress = Math.max(0, Math.min(1, prevStringProgress));
+                const prevStringZMin = nutZMin + (bodyZMin - nutZMin) * clampedPrevProgress;
+                const prevStringZMax = nutZMax + (bodyZMax - nutZMax) * clampedPrevProgress;
+                const prevStringWidth = prevStringZMax - prevStringZMin;
+                const prevStringSpacing = prevStringWidth / (STRING_TUNING.length - 1);
+                const prevStringZ = prevStringZMin + ((stringIndex - 1) * prevStringSpacing);
+                
+                // Use 30% of the distance from previous string
+                const distanceFromPrev = Math.abs(posZ - prevStringZ);
+                boxDepth = Math.min(distanceFromPrev * 0.3, 0.02); // Max 0.02
+            }
+            
+            // Ensure minimum depth for usability
+            boxDepth = Math.max(0.008, boxDepth); // At least 0.008 
+            
+            const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
             const material = new THREE.MeshBasicMaterial({
                 color: 0xff0000, // Red for debugging
                 transparent: true,
-                opacity: 0.5 // Visible for debugging
+                opacity: 0.3, // More transparent to see strings
+                side: THREE.DoubleSide
             });
 
             const zone = new THREE.Mesh(geometry, material);
 
-            // Position the zone
-            // Fret 1 is furthest left (most negative), Fret 12 is closer to body
-            // We need to map fretIndex 1..12 to positions
-            // Let's assume neckStartZ is the Nut (Fret 0)
-            zone.position.x = neckStartZ + (fretIndex * fretSpacing);
-            zone.position.y = neckStartY + (fretIndex * slope); // Apply slope correction
-            zone.position.z = (stringIndex - 2.5) * stringSpacing;
+            // Position at the intersection of fret and string
+            zone.position.set(posX, posY, posZ);
 
-            // Store metadata
+            // Store metadata (fretIndex + 1 because we start counting from fret 1)
             zone.userData = {
                 stringIndex,
-                fretIndex,
-                note: getNoteAt(stringIndex, fretIndex)
+                fretIndex: fretIndex + 1,
+                note: getNoteAt(stringIndex, fretIndex + 1)
             };
 
             scene.add(zone);
             fretZones.push(zone);
+            hitboxesForThisString++;
         }
+        
+        console.log(`String ${stringIndex + 1}: Created ${hitboxesForThisString} hitboxes`);
     }
+
+    console.log('Created fret zones based on model analysis:', {
+        fretCount: fretPositions.length,
+        stringCount: stringPositions.length,
+        expectedStrings: STRING_TUNING.length,
+        zonesCreated: fretZones.length,
+        expectedZones: STRING_TUNING.length * fretPositions.length,
+        neckAxis: neckAxis,
+        stringAxis: stringAxis
+    });
 }
 
 function setupFretClickHandler() {
@@ -614,19 +1183,25 @@ function renderSingleNoteGame() {
         renderMenu();
     });
 
-    // Initialize Three.js and load model
+    // Initialize based on view mode
     const container = document.getElementById('threeContainer');
-    if (initThreeJS(container)) {
-        loadGuitarModel().then(() => {
-            setupFretClickHandler();
-        }).catch(error => {
-            console.error('Failed to load guitar model:', error);
-            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
-            fallbackToCSS(container, 'singleNote');
-        });
-    } else {
-        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+    if (state.viewMode === '2d') {
+        // Use 2D view directly
         fallbackToCSS(container, 'singleNote');
+    } else {
+        // Try 3D view
+        if (initThreeJS(container)) {
+            loadGuitarModel().then(() => {
+                setupFretClickHandler();
+            }).catch(error => {
+                console.error('Failed to load guitar model:', error);
+                showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+                fallbackToCSS(container, 'singleNote');
+            });
+        } else {
+            console.warn('WebGL not supported or disabled. Using CSS fallback.');
+            fallbackToCSS(container, 'singleNote');
+        }
     }
 }
 
@@ -655,19 +1230,25 @@ function renderFindAllGame() {
         renderMenu();
     });
 
-    // Initialize Three.js and load model
+    // Initialize based on view mode
     const container = document.getElementById('threeContainer');
-    if (initThreeJS(container)) {
-        loadGuitarModel().then(() => {
-            setupFretClickHandler();
-        }).catch(error => {
-            console.error('Failed to load guitar model:', error);
-            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
-            fallbackToCSS(container, 'findAll');
-        });
-    } else {
-        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+    if (state.viewMode === '2d') {
+        // Use 2D view directly
         fallbackToCSS(container, 'findAll');
+    } else {
+        // Try 3D view
+        if (initThreeJS(container)) {
+            loadGuitarModel().then(() => {
+                setupFretClickHandler();
+            }).catch(error => {
+                console.error('Failed to load guitar model:', error);
+                showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+                fallbackToCSS(container, 'findAll');
+            });
+        } else {
+            console.warn('WebGL not supported or disabled. Using CSS fallback.');
+            fallbackToCSS(container, 'findAll');
+        }
     }
 }
 
@@ -961,19 +1542,25 @@ function renderTriadsGame() {
         renderMenu();
     });
 
-    // Initialize Three.js and load model
+    // Initialize based on view mode
     const container = document.getElementById('threeContainer');
-    if (initThreeJS(container)) {
-        loadGuitarModel().then(() => {
-            setupFretClickHandler();
-        }).catch(error => {
-            console.error('Failed to load guitar model:', error);
-            showFeedback('error', 'Failed to load 3D model. Using 2D view.');
-            fallbackToCSS(container, 'triads');
-        });
-    } else {
-        console.warn('WebGL not supported or disabled. Using CSS fallback.');
+    if (state.viewMode === '2d') {
+        // Use 2D view directly
         fallbackToCSS(container, 'triads');
+    } else {
+        // Try 3D view
+        if (initThreeJS(container)) {
+            loadGuitarModel().then(() => {
+                setupFretClickHandler();
+            }).catch(error => {
+                console.error('Failed to load guitar model:', error);
+                showFeedback('error', 'Failed to load 3D model. Using 2D view.');
+                fallbackToCSS(container, 'triads');
+            });
+        } else {
+            console.warn('WebGL not supported or disabled. Using CSS fallback.');
+            fallbackToCSS(container, 'triads');
+        }
     }
 }
 

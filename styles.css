@@ -97,8 +97,103 @@ body {
 .subtitle {
     font-size: 1.2rem;
     color: var(--text-secondary);
-    margin-bottom: 3rem;
+    margin-bottom: 2rem;
     font-weight: 400;
+}
+
+/* View Toggle */
+.view-toggle-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 2rem;
+}
+
+.view-toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.view-toggle-text {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.view-toggle-switch {
+    position: relative;
+    display: inline-block;
+}
+
+.view-toggle-switch input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: relative;
+    display: inline-block;
+    width: 120px;
+    height: 40px;
+    background: var(--glass-bg);
+    border: 2px solid var(--glass-border);
+    border-radius: 20px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    height: 32px;
+    width: 56px;
+    left: 4px;
+    bottom: 4px;
+    background: var(--text-secondary);
+    border-radius: 16px;
+    transition: all 0.3s ease;
+}
+
+.view-toggle-switch input:checked + .toggle-slider {
+    background: var(--primary-green);
+    border-color: var(--primary-green);
+}
+
+.view-toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(56px);
+    background: #000;
+}
+
+.toggle-label-left,
+.toggle-label-right {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    transition: opacity 0.3s ease;
+}
+
+.toggle-label-left {
+    left: 18px;
+}
+
+.toggle-label-right {
+    right: 18px;
+}
+
+.view-toggle-switch input:checked + .toggle-slider .toggle-label-left {
+    opacity: 0.5;
+}
+
+.view-toggle-switch input:not(:checked) + .toggle-slider .toggle-label-right {
+    opacity: 0.5;
 }
 
 .mode-cards {
