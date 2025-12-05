@@ -47,7 +47,9 @@ const state = {
     },
     // Time limit in seconds (0 = no limit)
     timeLimit: 0,
-    timeRemaining: 0
+    timeRemaining: 0,
+    // Disabled frets: array of fret numbers that are disabled (e.g., [1, 2, 3, 4, 5, 6])
+    disabledFrets: []
 };
 
 /* ========================================
@@ -149,6 +151,10 @@ function getRandomNote() {
     return NOTES[Math.floor(Math.random() * NOTES.length)];
 }
 
+function isFretDisabled(fretIndex) {
+    return state.disabledFrets.includes(fretIndex);
+}
+
 function getRandomTriad() {
     const rootNote = getRandomNote();
 
@@ -206,6 +212,28 @@ function renderMenu() {
                     </div>
                 </label>
             </div>
+            <div class="disabled-frets-container">
+                <label class="disabled-frets-label">
+                    <span class="disabled-frets-text">Disable Frets:</span>
+                    <div class="disabled-frets-controls">
+                        <div class="disabled-frets-range">
+                            <label class="range-label">
+                                <span>From:</span>
+                                <input type="range" id="disabledFretStart" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}" step="1">
+                                <span class="range-value" id="disabledFretStartValue">${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}</span>
+                            </label>
+                            <label class="range-label">
+                                <span>To:</span>
+                                <input type="range" id="disabledFretEnd" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}" step="1">
+                                <span class="range-value" id="disabledFretEndValue">${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}</span>
+                            </label>
+                        </div>
+                        <button class="toggle-disabled-frets-btn" id="toggleDisabledFretsBtn">
+                            ${state.disabledFrets.length > 0 ? 'Enable All Frets' : 'Disable Frets'}
+                        </button>
+                    </div>
+                </label>
+            </div>
             <div class="mode-cards">
                 <div class="mode-card" id="singleNoteMode">
                     <h2>Single Note</h2>
@@ -237,6 +265,44 @@ function renderMenu() {
         state.timeLimit = value;
         timeLimitValue.textContent = value === 0 ? 'None' : `${value}s`;
     });
+
+    // Setup disabled frets controls
+    const disabledFretStart = document.getElementById('disabledFretStart');
+    const disabledFretStartValue = document.getElementById('disabledFretStartValue');
+    const disabledFretEnd = document.getElementById('disabledFretEnd');
+    const disabledFretEndValue = document.getElementById('disabledFretEndValue');
+    const toggleDisabledFretsBtn = document.getElementById('toggleDisabledFretsBtn');
+
+    function updateDisabledFrets() {
+        const start = parseInt(disabledFretStart.value);
+        const end = parseInt(disabledFretEnd.value);
+        const minFret = Math.min(start, end);
+        const maxFret = Math.max(start, end);
+        
+        state.disabledFrets = [];
+        for (let i = minFret; i <= maxFret; i++) {
+            state.disabledFrets.push(i);
+        }
+        
+        disabledFretStartValue.textContent = start;
+        disabledFretEndValue.textContent = end;
+        toggleDisabledFretsBtn.textContent = state.disabledFrets.length > 0 ? 'Enable All Frets' : 'Disable Frets';
+    }
+
+    disabledFretStart.addEventListener('input', updateDisabledFrets);
+    disabledFretEnd.addEventListener('input', updateDisabledFrets);
+    
+    toggleDisabledFretsBtn.addEventListener('click', () => {
+        if (state.disabledFrets.length > 0) {
+            state.disabledFrets = [];
+            toggleDisabledFretsBtn.textContent = 'Disable Frets';
+        } else {
+            updateDisabledFrets();
+        }
+    });
+
+    // Initialize disabled frets display
+    updateDisabledFrets();
 
     document.getElementById('singleNoteMode').addEventListener('click', startSingleNoteGame);
     document.getElementById('findAllMode').addEventListener('click', startFindAllGame);
@@ -1457,11 +1523,13 @@ function createFretZones() {
                 // Depth: wider for easier clicking (Z-direction, across strings)
                 const boxDepth = Math.min(stringSpacing * 0.6, 0.04); // Max 60% of string spacing or 0.04 (wider for easier clicking)
 
+                const isDisabled = isFretDisabled(fretIndex);
+                
                 const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
                 const material = new THREE.MeshBasicMaterial({
-                    color: fretColors[fretIndex] || 0xff0000,
+                    color: isDisabled ? 0x666666 : (fretColors[fretIndex] || 0xff0000),
                     transparent: true,
-                    opacity: 0.6 // Higher opacity to better see overlaps between frets
+                    opacity: isDisabled ? 0.4 : 0.6 // Higher opacity to better see overlaps between frets
                 });
 
                 const zone = new THREE.Mesh(geometry, material);
@@ -1469,12 +1537,14 @@ function createFretZones() {
                 zone.position.y = neckStartY + (fretIndex * slope);
                 // Position exactly on the string
                 zone.position.z = (stringIndex - 2.5) * stringSpacing;
-                zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
+                zone.visible = isDisabled ? true : state.showDebug; // Disabled frets always visible
+                zone.material.opacity = isDisabled ? 0.3 : (state.showDebug ? 0.6 : 0);
 
                 zone.userData = {
                     stringIndex,
                     fretIndex,
-                    note: getNoteAt(stringIndex, fretIndex)
+                    note: getNoteAt(stringIndex, fretIndex),
+                    isDisabled: isDisabled
                 };
 
                 scene.add(zone);
@@ -1596,28 +1666,33 @@ function createFretZones() {
 
             const boxHeight = 0.04;
 
+            const actualFretIndex = fretIndex + 1;
+            const isDisabled = isFretDisabled(actualFretIndex);
+
             const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
             const material = new THREE.MeshBasicMaterial({
-                color: fretColors[fretIndex] || 0xff0000,
+                color: isDisabled ? 0x666666 : (fretColors[fretIndex] || 0xff0000),
                 transparent: true,
-                opacity: 0.6, // Higher opacity to better see overlaps between frets
+                opacity: isDisabled ? 0.4 : 0.6, // Higher opacity to better see overlaps between frets
                 side: THREE.DoubleSide
             });
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
             // Hitboxes are invisible by default, only visible on hover or feedback
+            // Disabled frets are always slightly visible
             zone.visible = true;
-            zone.material.opacity = state.showDebug ? 0.6 : 0; // Invisible when not in debug mode
+            zone.material.opacity = isDisabled ? 0.3 : (state.showDebug ? 0.6 : 0); // Disabled frets slightly visible
 
             zone.userData = {
                 stringIndex,
-                fretIndex: fretIndex + 1,
-                note: getNoteAt(stringIndex, fretIndex + 1),
-                originalColor: material.color.getHex(),
-                originalOpacity: state.showDebug ? 0.6 : 0, // Store original opacity
+                fretIndex: actualFretIndex,
+                note: getNoteAt(stringIndex, actualFretIndex),
+                originalColor: isDisabled ? 0x666666 : material.color.getHex(),
+                originalOpacity: isDisabled ? 0.3 : (state.showDebug ? 0.6 : 0), // Store original opacity
                 isHovered: false,
-                isFeedback: false // Track if showing feedback (correct/wrong)
+                isFeedback: false, // Track if showing feedback (correct/wrong)
+                isDisabled: isDisabled
             };
 
             scene.add(zone);
@@ -1739,28 +1814,33 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
 
             const boxHeight = 0.04;
 
+            const actualFretIndex = fretIndex + 1;
+            const isDisabled = isFretDisabled(actualFretIndex);
+
             const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
             const material = new THREE.MeshBasicMaterial({
-                color: fretColors[fretIndex] || 0xff0000,
+                color: isDisabled ? 0x666666 : (fretColors[fretIndex] || 0xff0000),
                 transparent: true,
-                opacity: 0.6, // Higher opacity to better see overlaps between frets
+                opacity: isDisabled ? 0.4 : 0.6, // Higher opacity to better see overlaps between frets
                 side: THREE.DoubleSide
             });
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
             // Hitboxes are invisible by default, only visible on hover or feedback
+            // Disabled frets are always slightly visible
             zone.visible = true;
-            zone.material.opacity = state.showDebug ? 0.6 : 0; // Invisible when not in debug mode
+            zone.material.opacity = isDisabled ? 0.3 : (state.showDebug ? 0.6 : 0); // Disabled frets slightly visible
 
             zone.userData = {
                 stringIndex,
-                fretIndex: fretIndex + 1,
-                note: getNoteAt(stringIndex, fretIndex + 1),
-                originalColor: material.color.getHex(),
-                originalOpacity: state.showDebug ? 0.6 : 0, // Store original opacity
+                fretIndex: actualFretIndex,
+                note: getNoteAt(stringIndex, actualFretIndex),
+                originalColor: isDisabled ? 0x666666 : material.color.getHex(),
+                originalOpacity: isDisabled ? 0.3 : (state.showDebug ? 0.6 : 0), // Store original opacity
                 isHovered: false,
-                isFeedback: false // Track if showing feedback (correct/wrong)
+                isFeedback: false, // Track if showing feedback (correct/wrong)
+                isDisabled: isDisabled
             };
 
             scene.add(zone);
@@ -1785,8 +1865,14 @@ function toggleDebugMode(enabled) {
             zone.visible = true; // Always visible now
             // Update opacity based on debug mode and feedback state
             if (!zone.userData.isFeedback && !zone.userData.isHovered) {
-                zone.material.opacity = enabled ? 0.6 : 0;
-                zone.userData.originalOpacity = enabled ? 0.6 : 0;
+                if (zone.userData.isDisabled) {
+                    // Disabled frets are always slightly visible
+                    zone.material.opacity = 0.3;
+                    zone.userData.originalOpacity = 0.3;
+                } else {
+                    zone.material.opacity = enabled ? 0.6 : 0;
+                    zone.userData.originalOpacity = enabled ? 0.6 : 0;
+                }
             }
         });
     }
@@ -1950,6 +2036,12 @@ function onFretClick(event) {
     if (intersects.length > 0) {
         const clickedZone = intersects[0].object;
         const { stringIndex, fretIndex, note } = clickedZone.userData;
+
+        // Check if fret is disabled
+        if (isFretDisabled(fretIndex)) {
+            showFeedback('error', `Fret ${fretIndex} is disabled!`);
+            return;
+        }
 
         // Call the appropriate handler based on game mode
         if (state.currentScreen === 'singleNote') {
@@ -2142,10 +2234,11 @@ function renderFretboard(highlightedPositions = []) {
             const isHighlighted = highlightedPositions.some(
                 pos => pos.string === stringIndex && pos.fret === fretIndex
             );
+            const isDisabled = isFretDisabled(fretIndex);
             const percentage = fretPercentages[fretIndex - 1];
 
             fretboardHTML += `
-                <div class="fret ${isHighlighted ? 'highlighted' : ''}" 
+                <div class="fret ${isHighlighted ? 'highlighted' : ''} ${isDisabled ? 'disabled' : ''}" 
                      data-string="${stringIndex}" 
                      data-fret="${fretIndex}"
                      style="flex-basis: ${percentage}%">
@@ -2940,6 +3033,13 @@ function handleSingleNoteDOMClick(event) {
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
+    
+    // Check if fret is disabled
+    if (isFretDisabled(fretIndex)) {
+        showFeedback('error', `Fret ${fretIndex} is disabled!`);
+        return;
+    }
+    
     const clickedNote = getNoteAt(stringIndex, fretIndex);
     const frequency = getFrequencyAt(stringIndex, fretIndex);
 
@@ -2967,6 +3067,12 @@ function handleFindAllDOMClick(event) {
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
+
+    // Check if fret is disabled
+    if (isFretDisabled(fretIndex)) {
+        showFeedback('error', `Fret ${fretIndex} is disabled!`);
+        return;
+    }
 
     // Check if already found
     const alreadyFound = state.foundPositions.some(
@@ -3007,6 +3113,13 @@ function handleTriadDOMClick(event) {
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
+    
+    // Check if fret is disabled
+    if (isFretDisabled(fretIndex)) {
+        showFeedback('error', `Fret ${fretIndex} is disabled!`);
+        return;
+    }
+    
     const clickedNote = getNoteAt(stringIndex, fretIndex);
     const frequency = getFrequencyAt(stringIndex, fretIndex);
 
