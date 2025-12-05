@@ -695,7 +695,7 @@ function loadGuitarModel() {
         const mtlLoader = new MTLLoader();
         mtlLoader.setPath('Gibson 335/');
 
-        mtlLoader.load('Gibson 335_Low_Poly.mtl', (materials) => {
+        mtlLoader.load('Gibson 335_High_Poly.mtl', (materials) => {
             materials.preload();
 
             const objLoader = new OBJLoader();
@@ -703,7 +703,7 @@ function loadGuitarModel() {
             objLoader.setPath('Gibson 335/');
 
             objLoader.load(
-                'Gibson 335_Low_Poly.obj',
+                'Gibson 335_High_Poly.obj',
                 (object) => {
                     guitarModel = object;
 
