@@ -66,7 +66,9 @@ const state = {
     // Timer started: track if timer has been started (starts on first click)
     timerStarted: false,
     // First question: track if this is the first question (timer waits for click)
-    isFirstQuestion: true
+    isFirstQuestion: true,
+    // Show solution: track if solution is currently being shown
+    showSolution: false
 };
 
 /* ========================================
@@ -2751,6 +2753,128 @@ function renderFretboard(highlightedPositions = []) {
     return fretboardHTML;
 }
 
+function showSolution() {
+    state.showSolution = !state.showSolution;
+    
+    if (state.viewMode === '2d') {
+        // For 2D view, re-render the fretboard with solution highlighted
+        const container = document.querySelector('.fretboard-container');
+        if (container) {
+            let highlighted = [];
+            
+            if (state.currentScreen === 'singleNote') {
+                if (state.showSolution) {
+                    highlighted = getAllPositions(state.targetNote);
+                }
+            } else if (state.currentScreen === 'findAll') {
+                if (state.showSolution) {
+                    highlighted = state.allPositions;
+                } else {
+                    highlighted = state.foundPositions;
+                }
+            } else if (state.currentScreen === 'triads') {
+                if (state.showSolution) {
+                    // Show all positions of all three notes in the triad
+                    const triad = state.targetTriad;
+                    if (triad) {
+                        triad.notes.forEach(note => {
+                            highlighted.push(...getAllPositions(note));
+                        });
+                    }
+                } else {
+                    highlighted = [...state.clickedTriadPositions];
+                    if (state.showTriadRootNote && state.triadRootNotePosition) {
+                        highlighted.push(state.triadRootNotePosition);
+                    }
+                }
+            }
+            
+            container.innerHTML = renderFretboard(highlighted);
+            
+            // Re-attach event listeners
+            const gameMode = state.currentScreen;
+            container.querySelectorAll('.fret').forEach(fret => {
+                if (gameMode === 'singleNote') {
+                    fret.addEventListener('click', handleSingleNoteDOMClick);
+                } else if (gameMode === 'findAll') {
+                    fret.addEventListener('click', handleFindAllDOMClick);
+                } else if (gameMode === 'triads') {
+                    fret.addEventListener('click', handleTriadDOMClick);
+                }
+            });
+        }
+    } else {
+        // For 3D view, highlight zones
+        if (fretZones && fretZones.length > 0) {
+            let solutionPositions = [];
+            
+            if (state.currentScreen === 'singleNote') {
+                if (state.showSolution) {
+                    solutionPositions = getAllPositions(state.targetNote);
+                }
+            } else if (state.currentScreen === 'findAll') {
+                if (state.showSolution) {
+                    solutionPositions = state.allPositions;
+                }
+            } else if (state.currentScreen === 'triads') {
+                if (state.showSolution) {
+                    const triad = state.targetTriad;
+                    if (triad) {
+                        triad.notes.forEach(note => {
+                            solutionPositions.push(...getAllPositions(note));
+                        });
+                    }
+                }
+            }
+            
+            fretZones.forEach(zone => {
+                const stringIndex = zone.userData.stringIndex;
+                const fretIndex = zone.userData.fretIndex;
+                const isInSolution = solutionPositions.some(
+                    pos => pos.string === stringIndex && pos.fret === fretIndex
+                );
+                
+                if (state.showSolution && isInSolution) {
+                    // Highlight solution positions
+                    zone.material.opacity = 0.8;
+                    zone.material.color.setHex(0xffff00); // Yellow for solution
+                } else {
+                    // Reset to normal state
+                    if (zone.userData.isFeedback) {
+                        // Keep feedback color if showing feedback
+                        return;
+                    }
+                    if (zone.userData.isRootNote) {
+                        // Keep root note highlight
+                        return;
+                    }
+                    if (zone.userData.isDisabled) {
+                        zone.material.opacity = 0.3;
+                    } else {
+                        zone.material.opacity = state.showDebug ? 0.6 : 0;
+                    }
+                    zone.material.color.setHex(zone.userData.originalColor);
+                }
+            });
+        }
+    }
+    
+    // Update button text
+    const solutionBtn = document.getElementById('solutionBtn');
+    if (solutionBtn) {
+        solutionBtn.textContent = state.showSolution ? 'Hide Solution' : 'Solution';
+    }
+}
+
+function updateSolutionDisplay() {
+    // Update solution display if it's currently showing
+    if (state.showSolution) {
+        showSolution(); // Toggle off
+        state.showSolution = true; // Set back to true
+        showSolution(); // Toggle on with new data
+    }
+}
+
 function showFeedback(type, message) {
     // Remove existing feedback
     const existingFeedback = document.querySelector('.feedback');
@@ -2866,15 +2990,22 @@ function handleTimeOut() {
     
     // Move to next task based on current game mode
     if (state.currentScreen === 'singleNote') {
+        const wasShowingSolution = state.showSolution;
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
+            // Update solution display if it was showing
+            if (wasShowingSolution) {
+                state.showSolution = true;
+                updateSolutionDisplay();
+            }
             // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
                 startTimer();
             }
         }, 1500);
     } else if (state.currentScreen === 'findAll') {
+        const wasShowingSolution = state.showSolution;
         setTimeout(() => {
             state.targetNote = getRandomNote();
             state.allPositions = getAllPositions(state.targetNote);
@@ -2889,12 +3020,18 @@ function handleTimeOut() {
             
             document.querySelector('.target-note').textContent = state.targetNote;
             document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
+            // Update solution display if it was showing
+            if (wasShowingSolution) {
+                state.showSolution = true;
+                updateSolutionDisplay();
+            }
             // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
                 startTimer();
             }
         }, 1500);
     } else if (state.currentScreen === 'triads') {
+        const wasShowingSolution = state.showSolution;
         setTimeout(() => {
             state.targetTriad = getRandomTriad();
             state.clickedTriadNotes = [];
@@ -2919,6 +3056,11 @@ function handleTimeOut() {
             highlightRootNotePosition();
             
             renderTriadsGameUpdate();
+            // Update solution display if it was showing
+            if (wasShowingSolution) {
+                state.showSolution = true;
+                updateSolutionDisplay();
+            }
             // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
                 startTimer();
@@ -2932,6 +3074,7 @@ function renderSingleNoteGame() {
     app.innerHTML = `
         <div class="game-screen">
             <button class="exit-btn" id="exitBtn">← Exit</button>
+            <button class="solution-btn" id="solutionBtn">Solution</button>
             <div class="game-header">
                 <div class="target-note">${state.targetNote}</div>
                 <div class="score-container">
@@ -2977,9 +3120,18 @@ function renderSingleNoteGame() {
     document.getElementById('exitBtn').addEventListener('click', () => {
         clearTimer();
         state.currentScreen = 'menu';
+        state.showSolution = false;
         cleanupThreeJS();
         renderMenu();
     });
+    
+    // Setup solution button
+    const solutionBtn = document.getElementById('solutionBtn');
+    if (solutionBtn) {
+        solutionBtn.addEventListener('click', () => {
+            showSolution();
+        });
+    }
 
     // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
@@ -3052,6 +3204,7 @@ function renderFindAllGame() {
     app.innerHTML = `
         <div class="game-screen">
             <button class="exit-btn" id="exitBtn">← Exit</button>
+            <button class="solution-btn" id="solutionBtn">Solution</button>
             <div class="game-header">
                 <div>
                     <div class="target-note">${state.targetNote}</div>
@@ -3100,9 +3253,18 @@ function renderFindAllGame() {
     document.getElementById('exitBtn').addEventListener('click', () => {
         clearTimer();
         state.currentScreen = 'menu';
+        state.showSolution = false;
         cleanupThreeJS();
         renderMenu();
     });
+    
+    // Setup solution button
+    const solutionBtn = document.getElementById('solutionBtn');
+    if (solutionBtn) {
+        solutionBtn.addEventListener('click', () => {
+            showSolution();
+        });
+    }
 
     // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
@@ -3176,6 +3338,7 @@ function startSingleNoteGame() {
     state.score = 0;
     state.errors = 0;
     state.isFirstQuestion = true; // Reset to first question for new game
+    state.showSolution = false; // Reset solution display
     renderSingleNoteGame();
 }
 
@@ -3187,6 +3350,7 @@ function startFindAllGame() {
     state.score = 0;
     state.errors = 0;
     state.isFirstQuestion = true; // Reset to first question for new game
+    state.showSolution = false; // Reset solution display
     renderFindAllGame();
 }
 
@@ -3231,9 +3395,16 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
         clearTimer();
         state.timerStarted = false;
         state.isFirstQuestion = false; // After first question, timer will auto-start
+        const wasShowingSolution = state.showSolution;
+        state.showSolution = false; // Reset solution display
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
+            // Update solution display if it was showing
+            if (wasShowingSolution) {
+                state.showSolution = true;
+                updateSolutionDisplay();
+            }
             // Auto-start timer if not first question, otherwise wait for click
             if (state.enableTimeLimit && state.timeLimit > 0) {
                 if (!state.isFirstQuestion) {
@@ -3317,6 +3488,8 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
             clearTimer();
             state.timerStarted = false;
             state.isFirstQuestion = false; // After first question, timer will auto-start
+            const wasShowingSolution = state.showSolution;
+            state.showSolution = false; // Reset solution display
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
@@ -3331,6 +3504,11 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
                 document.querySelector('.target-note').textContent = state.targetNote;
                 document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
+                // Update solution display if it was showing
+                if (wasShowingSolution) {
+                    state.showSolution = true;
+                    updateSolutionDisplay();
+                }
                 // Auto-start timer if not first question, otherwise wait for click
                 if (state.enableTimeLimit && state.timeLimit > 0) {
                     if (!state.isFirstQuestion) {
@@ -3415,6 +3593,8 @@ function handleTriadClick(stringIndex, fretIndex, note) {
                 clearTimer();
                 state.timerStarted = false;
                 state.isFirstQuestion = false; // After first question, timer will auto-start
+                const wasShowingSolution = state.showSolution;
+                state.showSolution = false; // Reset solution display
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
@@ -3440,6 +3620,11 @@ function handleTriadClick(stringIndex, fretIndex, note) {
 
                     // Update UI (we need to re-render the triad display)
                     renderTriadsGameUpdate();
+                    // Update solution display if it was showing
+                    if (wasShowingSolution) {
+                        state.showSolution = true;
+                        updateSolutionDisplay();
+                    }
                     // Auto-start timer if not first question, otherwise wait for click
                     if (state.enableTimeLimit && state.timeLimit > 0) {
                         if (!state.isFirstQuestion) {
@@ -3503,6 +3688,7 @@ function startTriadsGameFromSettings() {
     state.score = 0;
     state.errors = 0;
     state.isFirstQuestion = true; // Reset to first question for new game
+    state.showSolution = false; // Reset solution display
     
     // Set root note position if option is enabled
     state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
@@ -3618,6 +3804,7 @@ function renderTriadsGame() {
     app.innerHTML = `
         <div class="game-screen">
             <button class="exit-btn" id="exitBtn">← Exit</button>
+            <button class="solution-btn" id="solutionBtn">Solution</button>
             <div class="game-header">
                 <div>
                     <div class="triad-title">${triad.root} ${triad.typeName}</div>
@@ -3670,9 +3857,18 @@ function renderTriadsGame() {
     document.getElementById('exitBtn').addEventListener('click', () => {
         clearTimer();
         state.currentScreen = 'menu';
+        state.showSolution = false;
         cleanupThreeJS();
         renderMenu();
     });
+    
+    // Setup solution button
+    const solutionBtn = document.getElementById('solutionBtn');
+    if (solutionBtn) {
+        solutionBtn.addEventListener('click', () => {
+            showSolution();
+        });
+    }
 
     // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
@@ -3801,9 +3997,15 @@ function handleSingleNoteDOMClick(event) {
         state.timerStarted = false;
         state.isFirstQuestion = false; // After first question, timer will auto-start
 
+        const wasShowingSolution = state.showSolution;
         setTimeout(() => {
             state.targetNote = getRandomNote();
             renderSingleNoteGame();
+            // Update solution display if it was showing
+            if (wasShowingSolution) {
+                state.showSolution = true;
+                updateSolutionDisplay();
+            }
             // Auto-start timer if not first question
             if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
                 startTimer();
@@ -3857,11 +4059,17 @@ function handleFindAllDOMClick(event) {
             state.timerStarted = false;
             state.isFirstQuestion = false; // After first question, timer will auto-start
             
+            const wasShowingSolution = state.showSolution;
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
                 state.foundPositions = [];
                 renderFindAllGame();
+                // Update solution display if it was showing
+                if (wasShowingSolution) {
+                    state.showSolution = true;
+                    updateSolutionDisplay();
+                }
                 // Auto-start timer if not first question
                 if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
                     startTimer();
@@ -3918,6 +4126,7 @@ function handleTriadDOMClick(event) {
                 state.timerStarted = false;
                 state.isFirstQuestion = false; // After first question, timer will auto-start
                 
+                const wasShowingSolution = state.showSolution;
                 renderTriadsGame();
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
@@ -3944,6 +4153,11 @@ function handleTriadDOMClick(event) {
                     }
                     
                     renderTriadsGame();
+                    // Update solution display if it was showing
+                    if (wasShowingSolution) {
+                        state.showSolution = true;
+                        updateSolutionDisplay();
+                    }
                     // Auto-start timer if not first question
                     if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
                         startTimer();
