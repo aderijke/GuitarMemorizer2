@@ -354,14 +354,28 @@ body {
     text-shadow: 0 0 40px rgba(255, 255, 255, 0.5);
 }
 
-.score {
+.score-container {
     position: absolute;
     top: 2rem;
     right: 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.5rem;
+}
+
+.score {
     font-size: 1.5em;
     font-weight: bold;
     color: var(--primary-green);
     text-shadow: 0 0 20px rgba(0, 230, 118, 0.3);
+}
+
+.errors {
+    font-size: 1.5em;
+    font-weight: bold;
+    color: var(--error-red);
+    text-shadow: 0 0 20px rgba(255, 23, 68, 0.3);
 }
 
 .progress-info {
@@ -433,6 +447,9 @@ body {
     bottom: 2rem;
     left: 2rem;
     z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .debug-toggle-label {
@@ -464,6 +481,30 @@ body {
 
 .debug-toggle-label span {
     font-weight: 500;
+}
+
+.reset-camera-btn {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    color: var(--text-primary);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    font-family: 'Inter', sans-serif;
+    margin-left: 0.5rem;
+}
+
+.reset-camera-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--primary-green);
+    color: var(--primary-green);
+}
+
+.reset-camera-btn:active {
+    transform: scale(0.95);
 }
 
 /* ========================================

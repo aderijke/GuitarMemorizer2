@@ -21,6 +21,7 @@ const state = {
     currentScreen: 'menu',
     targetNote: '',
     score: 0,
+    errors: 0,
     foundPositions: [],
     allPositions: [],
     // View mode: '3d' or '2d'
@@ -213,7 +214,6 @@ function renderMenu() {
     const viewToggle = document.getElementById('viewModeToggle');
     viewToggle.addEventListener('change', (e) => {
         state.viewMode = e.target.checked ? '3d' : '2d';
-        console.log(`View mode changed to: ${state.viewMode}`);
     });
 
     document.getElementById('singleNoteMode').addEventListener('click', startSingleNoteGame);
@@ -224,6 +224,11 @@ function renderMenu() {
 /* ========================================
    THREE.JS SETUP AND MODEL LOADING
    ======================================== */
+
+// Default camera settings
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(-2.123, 1.330, 1.006);
+const DEFAULT_CAMERA_TARGET = new THREE.Vector3(-1.522, -0.597, 0.039);
+
 function initThreeJS(container) {
     try {
         // Create scene
@@ -237,8 +242,16 @@ function initThreeJS(container) {
             0.1,
             1000
         );
-        camera.position.set(0, 1.5, 3);
-        camera.lookAt(0, 0, 0);
+        // Set default camera position
+        camera.position.copy(DEFAULT_CAMERA_POSITION);
+        // Camera will look at controls.target which is set below
+        
+        // Debug: Log initial camera parameters
+        const initialDistance = camera.position.length();
+        
+        // Calculate spherical coordinates for reference
+        const initialSpherical = new THREE.Spherical();
+        initialSpherical.setFromVector3(camera.position);
 
         // Create renderer
         try {
@@ -248,7 +261,6 @@ function initThreeJS(container) {
             try {
                 renderer = new THREE.WebGLRenderer({ antialias: false });
             } catch (e2) {
-                console.error("WebGL not supported:", e2);
                 return false;
             }
         }
@@ -281,9 +293,88 @@ function initThreeJS(container) {
         controls.minDistance = 0.1; // Closer zoom for better fret visibility
         controls.maxDistance = 10; // Further zoom out
         controls.zoomSpeed = 1.2; // Faster zoom speed
-        controls.maxPolarAngle = Math.PI / 1.5;
-        controls.target.set(0, 0, 0);
+        // Allow more vertical rotation to see strings when guitar is rotated
+        controls.maxPolarAngle = Math.PI * 0.85; // ~153 degrees - allows looking down more
+        controls.minPolarAngle = Math.PI * 0.15; // ~27 degrees - prevents looking from below
+        controls.target.copy(DEFAULT_CAMERA_TARGET);
+        camera.lookAt(controls.target); // Make sure camera looks at target
         controls.update();
+        
+        // Get current spherical coordinates from controls
+        const controlsSpherical = new THREE.Spherical();
+        controlsSpherical.setFromVector3(
+            camera.position.clone().sub(controls.target)
+        );
+        
+        // Throttle logging to avoid console spam (log max once per second)
+        let lastLogTime = 0;
+        const logThrottle = 1000; // 1 second
+        let movementTimeout = null;
+        
+        // Adjust camera to keep strings visible when rotating the guitar
+        // When viewing from behind (snaren van je af), automatically adjust camera angle
+        controls.addEventListener('change', () => {
+            // Get current camera position relative to target
+            const direction = new THREE.Vector3();
+            direction.subVectors(camera.position, controls.target);
+            const distance = direction.length();
+            
+            // Get spherical coordinates
+            const spherical = new THREE.Spherical();
+            spherical.setFromVector3(direction);
+            
+            // Normalize azimuth to 0-2PI (0 = front, PI = back)
+            let azimuth = spherical.theta;
+            if (azimuth < 0) azimuth += Math.PI * 2;
+            
+            // Store current camera state for easy access
+            window._lastCameraState = {
+                position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+                target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
+                distance: distance,
+                spherical: { radius: spherical.radius, theta: spherical.theta, phi: spherical.phi },
+                azimuth: azimuth,
+                azimuthDegrees: azimuth * 180 / Math.PI,
+                polar: spherical.phi,
+                polarDegrees: spherical.phi * 180 / Math.PI
+            };
+            
+            // Clear existing timeout
+            if (movementTimeout) {
+                clearTimeout(movementTimeout);
+            }
+            
+            // Log camera state 500ms after user stops moving
+            movementTimeout = setTimeout(() => {
+                // Camera movement stopped - logging removed
+            }, 500);
+            
+            // Check if we're looking from behind (azimuth between 90 and 270 degrees)
+            // This is when the strings are facing away from the camera
+            const isLookingFromBehind = azimuth > Math.PI / 2 && azimuth < (3 * Math.PI) / 2;
+            
+            // Current polar angle (0 = top, PI/2 = horizontal, PI = bottom)
+            let polar = spherical.phi;
+            
+            // When looking from behind, limit how far down we can look
+            // to keep the strings visible instead of seeing the bottom
+            if (isLookingFromBehind) {
+                // Limit polar angle to ~60 degrees (Math.PI * 0.33) when looking from behind
+                // This keeps the camera high enough to see the strings
+                const maxPolarWhenBehind = Math.PI * 0.33; // ~60 degrees
+                if (polar > maxPolarWhenBehind) {
+                    polar = maxPolarWhenBehind;
+                    spherical.phi = polar;
+                    
+                    // Update camera position with adjusted angle
+                    const newDirection = new THREE.Vector3();
+                    newDirection.setFromSpherical(spherical);
+                    newDirection.multiplyScalar(distance);
+                    camera.position.copy(controls.target).add(newDirection);
+                    camera.lookAt(controls.target);
+                }
+            }
+        });
 
         // Setup raycaster for click detection
         raycaster = new THREE.Raycaster();
@@ -291,6 +382,98 @@ function initThreeJS(container) {
 
         // Setup debug tooltip for mouse hover
         setupDebugTooltip();
+        
+        // Function to reset camera to default position with animation
+        window.resetCamera = function() {
+            if (!camera || !controls) {
+                return;
+            }
+            
+            const startPosition = camera.position.clone();
+            const startTarget = controls.target.clone();
+            const endPosition = DEFAULT_CAMERA_POSITION.clone();
+            const endTarget = DEFAULT_CAMERA_TARGET.clone();
+            
+            const duration = 1000; // 1 second animation
+            const startTime = Date.now();
+            
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                
+                // Use easing function for smooth animation (ease-in-out)
+                const eased = progress < 0.5
+                    ? 2 * progress * progress
+                    : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+                
+                // Interpolate camera position
+                camera.position.lerpVectors(startPosition, endPosition, eased);
+                
+                // Interpolate target
+                controls.target.lerpVectors(startTarget, endTarget, eased);
+                
+                // Update camera to look at target
+                camera.lookAt(controls.target);
+                controls.update();
+                
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    // Ensure we end exactly at the target
+                    camera.position.copy(endPosition);
+                    controls.target.copy(endTarget);
+                    camera.lookAt(controls.target);
+                    controls.update();
+                }
+            }
+            
+            animate();
+        };
+        
+        // Expose function to console for getting current camera parameters
+        window.getCameraParams = function() {
+            if (!camera || !controls) {
+                return null;
+            }
+            
+            const direction = new THREE.Vector3();
+            direction.subVectors(camera.position, controls.target);
+            const distance = direction.length();
+            
+            const spherical = new THREE.Spherical();
+            spherical.setFromVector3(direction);
+            
+            let azimuth = spherical.theta;
+            if (azimuth < 0) azimuth += Math.PI * 2;
+            
+            const params = {
+                cameraPosition: {
+                    x: camera.position.x,
+                    y: camera.position.y,
+                    z: camera.position.z
+                },
+                target: {
+                    x: controls.target.x,
+                    y: controls.target.y,
+                    z: controls.target.z
+                },
+                distance: distance,
+                spherical: {
+                    radius: spherical.radius,
+                    theta: spherical.theta,
+                    phi: spherical.phi
+                },
+                angles: {
+                    azimuth: azimuth,
+                    azimuthDegrees: azimuth * 180 / Math.PI,
+                    polar: spherical.phi,
+                    polarDegrees: spherical.phi * 180 / Math.PI
+                }
+            };
+            
+            return params;
+        };
+        
 
         // Handle window resize
         window.addEventListener('resize', onWindowResize);
@@ -300,7 +483,6 @@ function initThreeJS(container) {
 
         return true;
     } catch (error) {
-        console.error("Error initializing Three.js:", error);
         return false;
     }
 }
@@ -314,9 +496,21 @@ function onWindowResize() {
     }
 }
 
+// Track if we've logged the initial state
+let hasLoggedInitialState = false;
+
 function animate() {
     requestAnimationFrame(animate);
     if (controls) controls.update();
+    
+    // Log camera state once after first frame (when everything is initialized)
+    if (!hasLoggedInitialState && controls && camera) {
+        hasLoggedInitialState = true;
+        setTimeout(() => {
+            // Initial camera state logged - logging removed
+        }, 100);
+    }
+    
     if (renderer && scene && camera) {
         renderer.render(scene, camera);
     }
@@ -339,13 +533,6 @@ function loadGuitarModel() {
                 (object) => {
                     guitarModel = object;
 
-                    // Debug: Log all mesh names to find frets
-                    console.log("Model loaded. Meshes:");
-                    guitarModel.traverse((child) => {
-                        if (child.isMesh) {
-                            console.log(`- ${child.name}`);
-                        }
-                    });
 
                     // Calculate neck region immediately
                     const neckRegion = findNeckRegion();
@@ -388,15 +575,13 @@ function loadGuitarModel() {
                     resolve(guitarModel);
                 },
                 (xhr) => {
-                    console.log((xhr.loaded / xhr.total * 100) + '% loaded');
+                    // Loading progress
                 },
                 (error) => {
-                    console.error('Error loading OBJ:', error);
                     reject(error);
                 }
             );
         }, undefined, (error) => {
-            console.error('Error loading MTL:', error);
             reject(error);
         });
     });
@@ -449,10 +634,7 @@ function findNeckRegion() {
         // Calculate scale length
         scaleLength = Math.abs(bridgeX - nutX);
 
-        console.log(`Found Nut at X=${nutX.toFixed(3)} and Bridge at X=${bridgeX.toFixed(3)}`);
-        console.log(`Calculated Scale Length: ${scaleLength.toFixed(3)}`);
     } else {
-        console.warn('Could not find Nut or Bridge objects, using estimation');
         // Fallback estimation
         nutX = overallMin.x + overallSize.x * 0.15;
         scaleLength = overallSize.x * 0.65;
@@ -465,11 +647,9 @@ function findNeckRegion() {
         const neckSize = neckBox.getSize(new THREE.Vector3());
         neckLength = neckSize.x; // Length along X axis
         neckWidth = neckSize.z; // Width along Z axis
-        console.log(`Found Neck mesh, length: ${neckLength.toFixed(3)}, width: ${neckWidth.toFixed(3)}`);
     } else {
         // Estimate: neck typically extends to about 12-14 frets, roughly 60-70% of scale length
         neckLength = scaleLength * 0.65;
-        console.warn('Could not find Neck mesh, using estimated length');
     }
 
     // Calculate neck width if not found from mesh
@@ -582,7 +762,6 @@ function extractFretPositionsFromGeometry(neckRegion) {
     });
 
     if (fretContainerObject) {
-        console.log(`Found fret container object: ${fretContainerObject.name}`);
         fretContainerObject.updateMatrixWorld(true);
         
         // Get bounding box of the fret container
@@ -596,7 +775,6 @@ function extractFretPositionsFromGeometry(neckRegion) {
         
         // Check if geometry has vertex colors
         if (geometry && geometry.attributes.color) {
-            console.log('Found vertex colors in geometry, analyzing color differences...');
             const colors = geometry.attributes.color;
             const positions = geometry.attributes.position;
             const worldMatrix = fretContainerObject.matrixWorld;
@@ -641,8 +819,6 @@ function extractFretPositionsFromGeometry(neckRegion) {
                 });
             });
             const avgBrightness = totalBrightness / totalCount;
-            
-            console.log(`Analyzing ${xColorGroups.size} X positions, average brightness: ${avgBrightness.toFixed(3)}`);
             
             // Find X positions where colors are significantly different (likely frets)
             // Frets might be darker (no color/material) or have different colors
@@ -692,8 +868,6 @@ function extractFretPositionsFromGeometry(neckRegion) {
             });
             
             if (fretCandidates.length > 0) {
-                console.log(`Found ${fretCandidates.length} fret candidates using vertex colors`);
-                
                 // Group nearby candidates using improved grouping function
                 // Use larger tolerance (1.5cm) to account for fret thickness
                 const groupedFrets = groupFretCandidates(fretCandidates, 0.015);
@@ -701,26 +875,14 @@ function extractFretPositionsFromGeometry(neckRegion) {
                 groupedFrets.sort((a, b) => a.x - b.x);
                 const validFrets = groupedFrets.filter(f => f.x > nutX && f.x < neckEndX);
                 
-                console.log(`Found ${validFrets.length} frets using vertex color analysis:`);
-                validFrets.forEach((fret, i) => {
-                    const type = fret.isDark ? 'dark' : (fret.isLight ? 'light' : 'varied');
-                    console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, brightness=${fret.brightness.toFixed(3)}, diff=${fret.brightnessDiff.toFixed(3)}, type=${type}`);
-                });
-                
-                // Return results from color detection (will be supplemented with calculated if needed)
+                // Return results from color detection
                 if (validFrets.length > 0) {
-                    console.log(`Using ${validFrets.length} frets from vertex color analysis`);
                     return validFrets;
                 }
-            } else {
-                console.log('No frets found using vertex color analysis');
             }
-        } else {
-            console.log('No vertex colors found in geometry - color/material detection requires vertex colors');
         }
         
         // Color/material detection did not find frets, try geometry analysis
-        console.log('Color/material detection did not find frets, trying geometry analysis...');
         
         // Method 2: Direct geometry analysis - analyze vertices and edges to find fret positions
         if (geometry && geometry.attributes.position) {
@@ -743,8 +905,6 @@ function extractFretPositionsFromGeometry(neckRegion) {
                     });
                 }
             }
-            
-            console.log(`Analyzing ${vertexData.length} vertices in neck region`);
             
             // Try multiple rounding precisions to find frets
             const precisions = [100, 200, 500, 1000, 2000]; // Different levels of precision
@@ -801,29 +961,20 @@ function extractFretPositionsFromGeometry(neckRegion) {
                 // Keep the result with the most frets
                 if (validFrets.length > bestFrets.length) {
                     bestFrets = validFrets;
-                    console.log(`Found ${validFrets.length} frets using precision ${precision}:`);
-                    validFrets.forEach((fret, i) => {
-                        console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, vertices=${fret.vertexCount}`);
-                    });
                 }
             }
             
             // Return up to 22 frets (NUM_FRETS - 1 = 22 for 22 frets)
             if (bestFrets.length >= NUM_FRETS - 1) {
-                console.log(`Extracted ${bestFrets.length} fret positions from geometry analysis, using first ${NUM_FRETS - 1}`);
                 return bestFrets.slice(0, NUM_FRETS - 1);
             } else if (bestFrets.length >= 8) {
-                console.log(`Found ${bestFrets.length} frets using geometry analysis (target: ${NUM_FRETS - 1})`);
                 return bestFrets;
-            } else {
-                console.log(`Geometry analysis found only ${bestFrets.length} frets, trying edge analysis...`);
             }
         }
         
         // Method 3: Analyze faces/edges to find vertical edges (frets)
         if (fretContainerObject.geometry && fretContainerObject.geometry.index) {
             const geometry2 = fretContainerObject.geometry;
-            console.log('Trying face/edge analysis method...');
             const positions = geometry2.attributes.position;
             const indices = geometry2.index;
             const worldMatrix = fretContainerObject.matrixWorld;
@@ -887,19 +1038,12 @@ function extractFretPositionsFromGeometry(neckRegion) {
                 }))
                 .sort((a, b) => a.x - b.x);
             
-            console.log(`Found ${fretCandidates.length} frets using edge analysis`);
-            
             if (fretCandidates.length > bestFrets.length) {
                 bestFrets = fretCandidates;
-                console.log('Edge analysis found more frets, using those:');
-                fretCandidates.forEach((fret, i) => {
-                    console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}`);
-                });
             }
         }
         
         // Method 4: Use raycasting to find frets by detecting height changes
-        console.log('Trying raycasting method to find frets...');
         // Scan along the X-axis at multiple Z positions to find where frets are located
         const raycaster = new THREE.Raycaster();
         const sampleCount = 1000; // Very high resolution scan
@@ -1003,23 +1147,15 @@ function extractFretPositionsFromGeometry(neckRegion) {
         groupedFrets.sort((a, b) => a.x - b.x);
         const validFrets = groupedFrets.filter(f => f.x > nutX && f.x < neckEndX);
         
-        console.log(`Found ${validFrets.length} frets using raycasting on fret container:`);
-        validFrets.forEach((fret, i) => {
-            console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, Y=${fret.y.toFixed(3)}, Z=${fret.z.toFixed(3)}`);
-        });
-        
         // Return up to 22 frets (NUM_FRETS - 1 = 22 for 22 frets)
         if (validFrets.length >= NUM_FRETS - 1) {
-            console.log(`Extracted ${validFrets.length} fret positions from fret container using raycasting, using first ${NUM_FRETS - 1}`);
             return validFrets.slice(0, NUM_FRETS - 1);
         } else if (validFrets.length > 0) {
-            console.log(`Found ${validFrets.length} frets using raycasting (target: ${NUM_FRETS - 1})`);
             return validFrets;
         }
     }
 
     // If we couldn't find the circulo mesh or extract frets, return null
-    console.warn('Could not find fret container mesh "circulo.009_circulo.060" or extract fret positions from geometry');
     return null;
 }
 
@@ -1045,8 +1181,6 @@ function findFretPositionsUsingCalculation(neckRegion) {
     // Use the exact scale length if available, otherwise estimate
     const scaleLength = neckRegion.scaleLength || (neckRegion.length * 0.9);
     const nutX = neckRegion.nutX || neckRegion.startX;
-
-    console.log(`Using Scale Length: ${scaleLength.toFixed(3)}, Nut Position: ${nutX.toFixed(3)}`);
 
     // For each fret (1-12), calculate position from the nut
     for (let fret = 1; fret < NUM_FRETS; fret++) {
@@ -1074,7 +1208,6 @@ function findFretPositionsUsingCalculation(neckRegion) {
     }
 
 
-    console.log(`Calculated ${fretPositions.length} fret positions, starting at X=${fretPositions[0]?.x.toFixed(3)} (fret 1), ending at X=${fretPositions[fretPositions.length - 1]?.x.toFixed(3)} (fret ${fretPositions.length})`);
     return fretPositions;
 }
 
@@ -1096,7 +1229,6 @@ function extractStringObjects() {
         }
     });
 
-    console.log(`Found ${stringObjects.length} string objects in model:`, stringObjects.map(s => s.name));
     return stringObjects;
 }
 
@@ -1157,11 +1289,6 @@ function analyzeStringGeometry(stringObjects, fretPositions, neckRegion) {
     // Sort by Z position (from low to high, which corresponds to string 1-6)
     stringsWithPositions.sort((a, b) => a.zAtFirstFret - b.zAtFirstFret);
 
-    console.log('Sorted strings:', stringsWithPositions.map(s => ({
-        name: s.name,
-        z: s.zAtFirstFret.toFixed(3)
-    })));
-
     // Extract positions BETWEEN frets (where hitboxes will be placed)
     // fretIndex 0 = between nut and fret 1
     // fretIndex 1 = between fret 1 and fret 2
@@ -1221,7 +1348,6 @@ function analyzeGuitarModel() {
     let fretPositions = extractFretPositionsFromGeometry(neckRegion);
 
     if (!fretPositions || fretPositions.length === 0) {
-        console.error('Could not extract fret positions from geometry. Make sure the mesh "circulo.009_circulo.060" exists in the model.');
         return null;
     }
 
@@ -1276,7 +1402,6 @@ function createFretZones() {
     const analysis = analyzeGuitarModel();
 
     if (!analysis) {
-        console.warn('Could not analyze guitar model, using fallback positions');
         // Fallback to old hardcoded positions
         const stringSpacing = 0.05;
         const fretSpacing = 0.20;
@@ -1340,13 +1465,11 @@ function createFretZones() {
     // Use analyzed positions
     const { fretPositions, neckRegion } = analysis;
 
-    console.log(`Creating hitboxes for ${STRING_TUNING.length} strings and ${fretPositions.length} frets`);
 
     // Extract string objects from the model
     const stringObjects = extractStringObjects();
 
     if (!stringObjects || stringObjects.length < 6) {
-        console.warn(`Expected 6 string objects but found ${stringObjects?.length || 0}, using fallback`);
         // Fall back to estimation if we don't have string geometry
         useFallbackHitboxes(fretPositions, neckRegion);
         return;
@@ -1356,12 +1479,10 @@ function createFretZones() {
     const stringPositionsByFret = analyzeStringGeometry(stringObjects, fretPositions, neckRegion);
 
     if (!stringPositionsByFret || stringPositionsByFret.length === 0) {
-        console.warn('Could not extract string positions from geometry, using fallback');
         useFallbackHitboxes(fretPositions, neckRegion);
         return;
     }
 
-    console.log(`Extracted string positions for ${stringPositionsByFret.length} frets`);
 
     // Get all meshes for raycasting to find exact fretboard surface
     const meshes = [];
@@ -1392,7 +1513,6 @@ function createFretZones() {
             
             // Validate: fretEndX should be greater than fretStartX
             if (fretEndX <= fretStartX) {
-                console.warn(`Fret ${fretIndex + 1}: Invalid fret positions (start=${fretStartX.toFixed(3)}, end=${fretEndX.toFixed(3)}), skipping`);
                 continue;
             }
             
@@ -1403,7 +1523,6 @@ function createFretZones() {
         } else {
             // All other frets: between previous fret and current fret
             if (fretIndex - 1 >= fretPositions.length || fretIndex >= fretPositions.length) {
-                console.warn(`Fret ${fretIndex + 1}: Missing fret positions, skipping`);
                 continue;
             }
             
@@ -1412,7 +1531,6 @@ function createFretZones() {
             
             // Validate: fretEndX should be greater than fretStartX
             if (fretEndX <= fretStartX) {
-                console.warn(`Fret ${fretIndex + 1}: Invalid fret positions (start=${fretStartX.toFixed(3)}, end=${fretEndX.toFixed(3)}), skipping`);
                 continue;
             }
             
@@ -1422,16 +1540,11 @@ function createFretZones() {
             targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
         }
 
-        // Debug: log the first few frets to see positioning
-        if (fretIndex < 3 || fretIndex >= stringPositionsByFret.length - 1) {
-            console.log(`Fret ${fretIndex + 1}: fretStart=${fretStartX.toFixed(3)}, fretEnd=${fretEndX.toFixed(3)}, hitbox targetX=${targetX.toFixed(3)}, width=${boxWidth.toFixed(3)}`);
-        }
 
         // Get string positions at this fret from the extracted geometry
         const stringPositions = stringPositionsByFret[fretIndex];
 
         if (!stringPositions || stringPositions.length < STRING_TUNING.length) {
-            console.warn(`Fret ${fretIndex + 1}: expected 6 strings but got ${stringPositions?.length || 0}`);
             continue;
         }
 
@@ -1440,7 +1553,6 @@ function createFretZones() {
             const stringPos = stringPositions[stringIndex];
 
             if (!stringPos) {
-                console.warn(`Fret ${fretIndex + 1}, String ${stringIndex + 1}: no position data`);
                 continue;
             }
 
@@ -1449,10 +1561,6 @@ function createFretZones() {
             const posY = stringPos.y + 0.01; // Slightly above string
             const posZ = stringPos.z;
 
-            // Debug first few hitboxes
-            if (fretIndex < 2 && stringIndex < 2) {
-                console.log(`Hitbox Fret ${fretIndex + 1}, String ${stringIndex + 1}: posX=${posX.toFixed(3)}, posY=${posY.toFixed(3)}, posZ=${posZ.toFixed(3)}`);
-            }
             // Calculate box depth (Z-direction, across strings) - make wider for easier clicking
             let boxDepth = 0.035; // Increased default depth
             if (stringIndex < STRING_TUNING.length - 1 && stringPositions[stringIndex + 1]) {
@@ -1476,12 +1584,18 @@ function createFretZones() {
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
-            zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
+            // Hitboxes are invisible by default, only visible on hover or feedback
+            zone.visible = true;
+            zone.material.opacity = state.showDebug ? 0.6 : 0; // Invisible when not in debug mode
 
             zone.userData = {
                 stringIndex,
                 fretIndex: fretIndex + 1,
-                note: getNoteAt(stringIndex, fretIndex + 1)
+                note: getNoteAt(stringIndex, fretIndex + 1),
+                originalColor: material.color.getHex(),
+                originalOpacity: state.showDebug ? 0.6 : 0, // Store original opacity
+                isHovered: false,
+                isFeedback: false // Track if showing feedback (correct/wrong)
             };
 
             scene.add(zone);
@@ -1489,7 +1603,9 @@ function createFretZones() {
         }
     }
 
-    console.log(`Created ${fretZones.length} hitboxes (expected: ${STRING_TUNING.length * fretPositions.length})`);
+    
+    // Setup mouse over effects for hitboxes
+    setupHitboxHoverEffects();
 }
 
 // Fallback function for when string geometry is not available
@@ -1577,10 +1693,6 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
             posX = fretStartX + margin + boxWidth / 2; // Center in the space between
         }
 
-        // Debug: log the first few frets
-        if (fretIndex < 3) {
-            console.log(`Fret ${fretIndex + 1}: fretStart=${fretStartX.toFixed(3)}, fretEnd=${fretEndX.toFixed(3)}, hitbox center=${posX.toFixed(3)}, width=${boxWidth.toFixed(3)}`);
-        }
         const progress = Math.max(0, Math.min(1, (posX - neckStartX) / neckLength));
         const currentZMin = nutZMin + (bodyZMin - nutZMin) * progress;
         const currentZMax = nutZMax + (bodyZMax - nutZMax) * progress;
@@ -1615,12 +1727,18 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
-            zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
+            // Hitboxes are invisible by default, only visible on hover or feedback
+            zone.visible = true;
+            zone.material.opacity = state.showDebug ? 0.6 : 0; // Invisible when not in debug mode
 
             zone.userData = {
                 stringIndex,
                 fretIndex: fretIndex + 1,
-                note: getNoteAt(stringIndex, fretIndex + 1)
+                note: getNoteAt(stringIndex, fretIndex + 1),
+                originalColor: material.color.getHex(),
+                originalOpacity: state.showDebug ? 0.6 : 0, // Store original opacity
+                isHovered: false,
+                isFeedback: false // Track if showing feedback (correct/wrong)
             };
 
             scene.add(zone);
@@ -1628,7 +1746,9 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
         }
     }
 
-    console.log(`Created ${fretZones.length} fallback hitboxes`);
+    
+    // Setup mouse over effects for hitboxes
+    setupHitboxHoverEffects();
 }
 
 /**
@@ -1637,10 +1757,15 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
 function toggleDebugMode(enabled) {
     state.showDebug = enabled;
     
-    // Show/hide hitboxes
+    // Update hitbox visibility and opacity
     if (fretZones && fretZones.length > 0) {
         fretZones.forEach(zone => {
-            zone.visible = enabled;
+            zone.visible = true; // Always visible now
+            // Update opacity based on debug mode and feedback state
+            if (!zone.userData.isFeedback && !zone.userData.isHovered) {
+                zone.material.opacity = enabled ? 0.6 : 0;
+                zone.userData.originalOpacity = enabled ? 0.6 : 0;
+            }
         });
     }
     
@@ -1699,6 +1824,19 @@ function setupDebugTooltip() {
     canvas.addEventListener('mouseleave', () => {
         tooltip.style.display = 'none';
     });
+}
+
+/**
+ * Setup mouse over effects for hitboxes
+ */
+let hoveredHitbox = null;
+
+let hoverEffectsSetup = false;
+
+function setupHitboxHoverEffects() {
+    // Hover effects disabled - only feedback on click (red/green) is shown
+    // This function is kept for compatibility but does nothing
+    return;
 }
 
 /**
@@ -1841,7 +1979,6 @@ function cleanupThreeJS() {
 
 
 function fallbackToCSS(container, gameMode) {
-    console.log("Falling back to CSS renderer");
     cleanupThreeJS(); // Ensure clean state
     container.classList.add('use-css-fallback');
 
@@ -1879,7 +2016,7 @@ function renderFretboard(highlightedPositions = []) {
     // Add fret marker dots - place them in the same flex structure as fret numbers
     // Markers go in the middle of specific fret spaces (between frets)
     fretboardHTML += '<div class="fret-markers">';
-    const markerFrets = [3, 5, 7, 9, 12];
+    const markerFrets = [3, 5, 7, 9, 12, 15, 17, 19, 21];
 
     // Create a flex container matching the fret layout
     fretboardHTML += '<div class="fret-markers-container">';
@@ -1959,6 +2096,20 @@ function showFeedback(type, message) {
     }, 2000);
 }
 
+function updateScoreDisplay() {
+    const scoreElement = document.querySelector('.score');
+    if (scoreElement) {
+        scoreElement.textContent = `Score: ${state.score}`;
+    }
+}
+
+function updateErrorsDisplay() {
+    const errorsElement = document.querySelector('.errors');
+    if (errorsElement) {
+        errorsElement.textContent = `Fouten: ${state.errors}`;
+    }
+}
+
 function renderSingleNoteGame() {
     const app = document.getElementById('app');
     app.innerHTML = `
@@ -1966,7 +2117,10 @@ function renderSingleNoteGame() {
             <button class="exit-btn" id="exitBtn">← Exit</button>
             <div class="game-header">
                 <div class="target-note">${state.targetNote}</div>
-                <div class="score">Score: ${state.score}</div>
+                <div class="score-container">
+                    <div class="score">Score: ${state.score}</div>
+                    <div class="errors">Fouten: ${state.errors}</div>
+                </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
@@ -1974,6 +2128,7 @@ function renderSingleNoteGame() {
                         <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
                         <span>Debug Info</span>
                     </label>
+                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -1986,12 +2141,21 @@ function renderSingleNoteGame() {
         renderMenu();
     });
 
-    // Setup debug toggle (only for 3D view)
+    // Setup debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
                 toggleDebugMode(e.target.checked);
+            });
+        }
+        
+        const resetCameraBtn = document.getElementById('resetCameraBtn');
+        if (resetCameraBtn) {
+            resetCameraBtn.addEventListener('click', () => {
+                if (window.resetCamera) {
+                    window.resetCamera();
+                }
             });
         }
     }
@@ -2007,12 +2171,10 @@ function renderSingleNoteGame() {
             loadGuitarModel().then(() => {
                 setupFretClickHandler();
             }).catch(error => {
-                console.error('Failed to load guitar model:', error);
                 showFeedback('error', 'Failed to load 3D model. Using 2D view.');
                 fallbackToCSS(container, 'singleNote');
             });
         } else {
-            console.warn('WebGL not supported or disabled. Using CSS fallback.');
             fallbackToCSS(container, 'singleNote');
         }
     }
@@ -2031,7 +2193,10 @@ function renderFindAllGame() {
                     <div class="target-note">${state.targetNote}</div>
                     <div class="progress-info">Found: ${found} / ${total}</div>
                 </div>
-                <div class="score">Score: ${state.score}</div>
+                <div class="score-container">
+                    <div class="score">Score: ${state.score}</div>
+                    <div class="errors">Fouten: ${state.errors}</div>
+                </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
@@ -2039,6 +2204,7 @@ function renderFindAllGame() {
                         <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
                         <span>Debug Info</span>
                     </label>
+                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -2051,12 +2217,21 @@ function renderFindAllGame() {
         renderMenu();
     });
 
-    // Setup debug toggle (only for 3D view)
+    // Setup debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
                 toggleDebugMode(e.target.checked);
+            });
+        }
+        
+        const resetCameraBtn = document.getElementById('resetCameraBtn');
+        if (resetCameraBtn) {
+            resetCameraBtn.addEventListener('click', () => {
+                if (window.resetCamera) {
+                    window.resetCamera();
+                }
             });
         }
     }
@@ -2072,12 +2247,10 @@ function renderFindAllGame() {
             loadGuitarModel().then(() => {
                 setupFretClickHandler();
             }).catch(error => {
-                console.error('Failed to load guitar model:', error);
                 showFeedback('error', 'Failed to load 3D model. Using 2D view.');
                 fallbackToCSS(container, 'findAll');
             });
         } else {
-            console.warn('WebGL not supported or disabled. Using CSS fallback.');
             fallbackToCSS(container, 'findAll');
         }
     }
@@ -2089,6 +2262,8 @@ function renderFindAllGame() {
 function startSingleNoteGame() {
     state.currentScreen = 'singleNote';
     state.targetNote = getRandomNote();
+    state.score = 0;
+    state.errors = 0;
     renderSingleNoteGame();
 }
 
@@ -2097,6 +2272,8 @@ function startFindAllGame() {
     state.targetNote = getRandomNote();
     state.allPositions = getAllPositions(state.targetNote);
     state.foundPositions = [];
+    state.score = 0;
+    state.errors = 0;
     renderFindAllGame();
 }
 
@@ -2116,10 +2293,15 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
             z.userData.fretIndex === fretIndex
         );
         if (zone) {
-            zone.material.opacity = 0.5;
-            zone.material.color.setHex(0x00ff00);
+            zone.userData.isFeedback = true;
+            zone.material.opacity = 0.7;
+            zone.material.color.setHex(0x00ff00); // Green for correct
             setTimeout(() => {
-                zone.material.opacity = 0;
+                zone.userData.isFeedback = false;
+                zone.material.color.setHex(zone.userData.originalColor);
+                // Reset to invisible (0) unless debug mode is on
+                zone.material.opacity = state.showDebug ? 0.6 : 0;
+                zone.userData.originalOpacity = zone.material.opacity;
             }, 1500);
         }
 
@@ -2127,7 +2309,7 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
         state.score += 1;
 
         // Update score display
-        document.querySelector('.score').textContent = `Score: ${state.score}`;
+        updateScoreDisplay();
 
         // Auto-advance to next note
         setTimeout(() => {
@@ -2135,7 +2317,26 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
             document.querySelector('.target-note').textContent = state.targetNote;
         }, 1500);
     } else {
-        // Wrong answer
+        // Wrong answer - show red feedback
+        const zone = fretZones.find(z =>
+            z.userData.stringIndex === stringIndex &&
+            z.userData.fretIndex === fretIndex
+        );
+        if (zone) {
+            zone.userData.isFeedback = true;
+            const originalColor = zone.material.color.getHex();
+            zone.material.opacity = 0.7;
+            zone.material.color.setHex(0xff0000); // Red for wrong
+            setTimeout(() => {
+                zone.userData.isFeedback = false;
+                zone.material.color.setHex(originalColor);
+                // Reset to invisible (0) unless debug mode is on
+                zone.material.opacity = state.showDebug ? 0.6 : 0;
+                zone.userData.originalOpacity = zone.material.opacity;
+            }, 1000);
+        }
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `Incorrect. That was ${note}. Try again!`);
     }
 }
@@ -2157,14 +2358,15 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
         // Correct position
         state.foundPositions.push({ string: stringIndex, fret: fretIndex });
 
-        // Highlight the zone permanently
+        // Highlight the zone permanently (green for correct)
         const zone = fretZones.find(z =>
             z.userData.stringIndex === stringIndex &&
             z.userData.fretIndex === fretIndex
         );
         if (zone) {
+            zone.userData.isFeedback = true;
             zone.material.opacity = 0.7;
-            zone.material.color.setHex(0x00e676);
+            zone.material.color.setHex(0x00ff00); // Green for correct
         }
 
         const remaining = state.allPositions.length - state.foundPositions.length;
@@ -2176,7 +2378,7 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
             // All found!
             showFeedback('success', `Awesome! You found all ${state.targetNote}'s!`);
             state.score += 10;
-            document.querySelector('.score').textContent = `Score: ${state.score}`;
+            updateScoreDisplay();
 
             // Auto-advance to next note
             setTimeout(() => {
@@ -2185,14 +2387,37 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
                 state.foundPositions = [];
 
                 // Reset all zones
-                fretZones.forEach(z => z.material.opacity = 0);
+                fretZones.forEach(z => {
+                    z.userData.isFeedback = false;
+                    z.material.color.setHex(z.userData.originalColor);
+                    z.material.opacity = z.userData.originalOpacity;
+                });
 
                 document.querySelector('.target-note').textContent = state.targetNote;
                 document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
             }, 2000);
         }
     } else {
-        // Wrong position
+        // Wrong position - show red feedback
+        const zone = fretZones.find(z =>
+            z.userData.stringIndex === stringIndex &&
+            z.userData.fretIndex === fretIndex
+        );
+        if (zone) {
+            zone.userData.isFeedback = true;
+            const originalColor = zone.material.color.getHex();
+            zone.material.opacity = 0.7;
+            zone.material.color.setHex(0xff0000); // Red for wrong
+            setTimeout(() => {
+                zone.userData.isFeedback = false;
+                zone.material.color.setHex(originalColor);
+                // Reset to invisible (0) unless debug mode is on
+                zone.material.opacity = state.showDebug ? 0.6 : 0;
+                zone.userData.originalOpacity = zone.material.opacity;
+            }, 1000);
+        }
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `Oops, that's a ${note}. Keep looking for ${state.targetNote}.`);
     }
 }
@@ -2210,14 +2435,15 @@ function handleTriadClick(stringIndex, fretIndex, note) {
             state.clickedTriadNotes.push(note);
             state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
 
-            // Highlight the zone
+            // Highlight the zone (green for correct)
             const zone = fretZones.find(z =>
                 z.userData.stringIndex === stringIndex &&
                 z.userData.fretIndex === fretIndex
             );
             if (zone) {
+                zone.userData.isFeedback = true;
                 zone.material.opacity = 0.7;
-                zone.material.color.setHex(0x00e676);
+                zone.material.color.setHex(0x00ff00); // Green for correct
             }
 
             // Check if all notes are clicked
@@ -2225,7 +2451,7 @@ function handleTriadClick(stringIndex, fretIndex, note) {
                 // All notes found!
                 showFeedback('success', 'Perfect! All notes found!');
                 state.score += 1;
-                document.querySelector('.score').textContent = `Score: ${state.score}`;
+                updateScoreDisplay();
 
                 // Auto-advance to next triad
                 setTimeout(() => {
@@ -2249,7 +2475,26 @@ function handleTriadClick(stringIndex, fretIndex, note) {
             showFeedback('error', `You already found ${note}.`);
         }
     } else {
-        // Wrong note
+        // Wrong note - show red feedback
+        const zone = fretZones.find(z =>
+            z.userData.stringIndex === stringIndex &&
+            z.userData.fretIndex === fretIndex
+        );
+        if (zone) {
+            zone.userData.isFeedback = true;
+            const originalColor = zone.material.color.getHex();
+            zone.material.opacity = 0.7;
+            zone.material.color.setHex(0xff0000); // Red for wrong
+            setTimeout(() => {
+                zone.userData.isFeedback = false;
+                zone.material.color.setHex(originalColor);
+                // Reset to invisible (0) unless debug mode is on
+                zone.material.opacity = state.showDebug ? 0.6 : 0;
+                zone.userData.originalOpacity = zone.material.opacity;
+            }, 1000);
+        }
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `That's ${note}, not part of the ${triad.root} ${triad.typeName} triad.`);
     }
 }
@@ -2269,6 +2514,7 @@ function startTriadsGameFromSettings() {
     state.clickedTriadNotes = [];
     state.clickedTriadPositions = [];
     state.score = 0;
+    state.errors = 0;
     renderTriadsGame();
 }
 
@@ -2361,7 +2607,10 @@ function renderTriadsGame() {
                         `).join('')}
                     </div>
                 </div>
-                <div class="score">Score: ${state.score}</div>
+                <div class="score-container">
+                    <div class="score">Score: ${state.score}</div>
+                    <div class="errors">Fouten: ${state.errors}</div>
+                </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
@@ -2369,6 +2618,7 @@ function renderTriadsGame() {
                         <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
                         <span>Debug Info</span>
                     </label>
+                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -2381,12 +2631,21 @@ function renderTriadsGame() {
         renderMenu();
     });
 
-    // Setup debug toggle (only for 3D view)
+    // Setup debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
                 toggleDebugMode(e.target.checked);
+            });
+        }
+        
+        const resetCameraBtn = document.getElementById('resetCameraBtn');
+        if (resetCameraBtn) {
+            resetCameraBtn.addEventListener('click', () => {
+                if (window.resetCamera) {
+                    window.resetCamera();
+                }
             });
         }
     }
@@ -2402,12 +2661,10 @@ function renderTriadsGame() {
             loadGuitarModel().then(() => {
                 setupFretClickHandler();
             }).catch(error => {
-                console.error('Failed to load guitar model:', error);
                 showFeedback('error', 'Failed to load 3D model. Using 2D view.');
                 fallbackToCSS(container, 'triads');
             });
         } else {
-            console.warn('WebGL not supported or disabled. Using CSS fallback.');
             fallbackToCSS(container, 'triads');
         }
     }
@@ -2458,13 +2715,15 @@ function handleSingleNoteDOMClick(event) {
         fret.innerHTML = `<div class="note-marker found">${clickedNote}</div>`;
         showFeedback('success', 'Correct! Great job!');
         state.score += 1;
-        document.querySelector('.score').textContent = `Score: ${state.score}`;
+        updateScoreDisplay();
 
         setTimeout(() => {
             state.targetNote = getRandomNote();
             renderSingleNoteGame();
         }, 1500);
     } else {
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `Incorrect. That was ${clickedNote}. Try again!`);
     }
 }
@@ -2503,6 +2762,8 @@ function handleFindAllDOMClick(event) {
             }, 2000);
         }
     } else {
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `Oops, that's a ${clickedNote}. Keep looking for ${state.targetNote}.`);
     }
 }
@@ -2541,6 +2802,8 @@ function handleTriadDOMClick(event) {
             showFeedback('error', `You already found ${clickedNote}.`);
         }
     } else {
+        state.errors += 1;
+        updateErrorsDisplay();
         showFeedback('error', `That's ${clickedNote}, not part of the ${triad.root} ${triad.typeName} triad.`);
     }
 }
@@ -2560,38 +2823,8 @@ function updateCSSFretboardRotation() {
 }
 
 function initCSSRotationControls() {
-    const fretboardContainer = document.querySelector('.fretboard-container');
-    if (!fretboardContainer) return;
-
-    fretboardContainer.addEventListener('mousedown', (e) => {
-        if (e.target.closest('.fret')) return;
-        isDraggingCSS = true;
-        lastMouseXCSS = e.clientX;
-        lastMouseYCSS = e.clientY;
-        fretboardContainer.style.cursor = 'grabbing';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (!isDraggingCSS) return;
-        const deltaX = e.clientX - lastMouseXCSS;
-        const deltaY = e.clientY - lastMouseYCSS;
-        state.rotation.y += deltaX * 0.5;
-        state.rotation.x -= deltaY * 0.5;
-        state.rotation.x = Math.max(-60, Math.min(80, state.rotation.x));
-        updateCSSFretboardRotation();
-        lastMouseXCSS = e.clientX;
-        lastMouseYCSS = e.clientY;
-    });
-
-    document.addEventListener('mouseup', () => {
-        if (isDraggingCSS) {
-            isDraggingCSS = false;
-            const fretboardContainer = document.querySelector('.fretboard-container');
-            if (fretboardContainer) {
-                fretboardContainer.style.cursor = 'grab';
-            }
-        }
-    });
+    // Rotation disabled for 2D version - no rotation controls
+    return;
 }
 
 /* ========================================
