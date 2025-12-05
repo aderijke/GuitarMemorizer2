@@ -13,6 +13,7 @@ let scene, camera, renderer, controls;
 let guitarModel = null;
 let fretZones = []; // Array of clickable mesh zones for frets
 let raycaster, mouse;
+let gameTimer = null; // Timer for time limit countdown
 
 /* ========================================
    STATE MANAGEMENT
@@ -43,7 +44,10 @@ const state = {
     rotation: {
         x: 35,
         y: 0
-    }
+    },
+    // Time limit in seconds (0 = no limit)
+    timeLimit: 0,
+    timeRemaining: 0
 };
 
 /* ========================================
@@ -193,6 +197,15 @@ function renderMenu() {
                     </div>
                 </label>
             </div>
+            <div class="time-limit-container">
+                <label class="time-limit-label">
+                    <span class="time-limit-text">Time Limit (seconds):</span>
+                    <div class="time-limit-control">
+                        <input type="range" id="timeLimitSlider" min="0" max="10" value="${state.timeLimit}" step="1">
+                        <span class="time-limit-value" id="timeLimitValue">${state.timeLimit === 0 ? 'None' : `${state.timeLimit}s`}</span>
+                    </div>
+                </label>
+            </div>
             <div class="mode-cards">
                 <div class="mode-card" id="singleNoteMode">
                     <h2>Single Note</h2>
@@ -214,6 +227,15 @@ function renderMenu() {
     const viewToggle = document.getElementById('viewModeToggle');
     viewToggle.addEventListener('change', (e) => {
         state.viewMode = e.target.checked ? '3d' : '2d';
+    });
+
+    // Setup time limit slider
+    const timeLimitSlider = document.getElementById('timeLimitSlider');
+    const timeLimitValue = document.getElementById('timeLimitValue');
+    timeLimitSlider.addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        state.timeLimit = value;
+        timeLimitValue.textContent = value === 0 ? 'None' : `${value}s`;
     });
 
     document.getElementById('singleNoteMode').addEventListener('click', startSingleNoteGame);
@@ -2177,7 +2199,110 @@ function updateScoreDisplay() {
 function updateErrorsDisplay() {
     const errorsElement = document.querySelector('.errors');
     if (errorsElement) {
-        errorsElement.textContent = `Fouten: ${state.errors}`;
+        errorsElement.textContent = `Errors: ${state.errors}`;
+    }
+}
+
+function clearTimer() {
+    if (gameTimer) {
+        clearInterval(gameTimer);
+        gameTimer = null;
+    }
+    state.timeRemaining = 0;
+    updateTimerDisplay();
+}
+
+function startTimer() {
+    clearTimer();
+    
+    if (state.timeLimit === 0) {
+        // No time limit, hide timer
+        const timerElement = document.querySelector('.timer-display');
+        if (timerElement) {
+            timerElement.style.display = 'none';
+            timerElement.textContent = 'Time: None'; // Set correct content even when hidden
+        }
+        return;
+    }
+    
+    // Show timer
+    const timerElement = document.querySelector('.timer-display');
+    if (timerElement) {
+        timerElement.style.display = 'block';
+    }
+    
+    state.timeRemaining = state.timeLimit;
+    updateTimerDisplay();
+    
+    gameTimer = setInterval(() => {
+        state.timeRemaining -= 1;
+        updateTimerDisplay();
+        
+        if (state.timeRemaining <= 0) {
+            clearTimer();
+            handleTimeOut();
+        }
+    }, 1000);
+}
+
+function updateTimerDisplay() {
+    const timerElement = document.querySelector('.timer-display');
+    if (timerElement) {
+        if (state.timeLimit === 0) {
+            timerElement.style.display = 'none';
+        } else {
+            timerElement.textContent = `Time: ${state.timeRemaining}s`;
+            // Add warning class when time is running low
+            if (state.timeRemaining <= 3) {
+                timerElement.classList.add('timer-warning');
+            } else {
+                timerElement.classList.remove('timer-warning');
+            }
+        }
+    }
+}
+
+function handleTimeOut() {
+    showFeedback('error', "Time's up! Try again.");
+    state.errors += 1;
+    updateErrorsDisplay();
+    
+    // Move to next task based on current game mode
+    if (state.currentScreen === 'singleNote') {
+        setTimeout(() => {
+            state.targetNote = getRandomNote();
+            document.querySelector('.target-note').textContent = state.targetNote;
+            startTimer();
+        }, 1500);
+    } else if (state.currentScreen === 'findAll') {
+        setTimeout(() => {
+            state.targetNote = getRandomNote();
+            state.allPositions = getAllPositions(state.targetNote);
+            state.foundPositions = [];
+            
+            // Reset all zones
+            fretZones.forEach(z => {
+                z.userData.isFeedback = false;
+                z.material.color.setHex(z.userData.originalColor);
+                z.material.opacity = z.userData.originalOpacity;
+            });
+            
+            document.querySelector('.target-note').textContent = state.targetNote;
+            document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
+            startTimer();
+        }, 1500);
+    } else if (state.currentScreen === 'triads') {
+        setTimeout(() => {
+            state.targetTriad = getRandomTriad();
+            state.clickedTriadNotes = [];
+            state.clickedTriadPositions = [];
+            
+            // Reset all zones
+            fretZones.forEach(z => z.material.opacity = 0);
+            
+            renderTriadsGameUpdate();
+            startTimer();
+        }, 1500);
     }
 }
 
@@ -2189,8 +2314,9 @@ function renderSingleNoteGame() {
             <div class="game-header">
                 <div class="target-note">${state.targetNote}</div>
                 <div class="score-container">
+                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
                     <div class="score">Score: ${state.score}</div>
-                    <div class="errors">Fouten: ${state.errors}</div>
+                    <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
@@ -2207,6 +2333,7 @@ function renderSingleNoteGame() {
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
+        clearTimer();
         state.currentScreen = 'menu';
         cleanupThreeJS();
         renderMenu();
@@ -2249,6 +2376,15 @@ function renderSingleNoteGame() {
             fallbackToCSS(container, 'singleNote');
         }
     }
+    
+    // Initialize timer display correctly
+    const timerElement = document.querySelector('.timer-display');
+    if (timerElement && state.timeLimit === 0) {
+        timerElement.textContent = 'Time: None';
+    }
+    
+    // Start timer if time limit is set
+    startTimer();
 }
 
 function renderFindAllGame() {
@@ -2265,8 +2401,9 @@ function renderFindAllGame() {
                     <div class="progress-info">Found: ${found} / ${total}</div>
                 </div>
                 <div class="score-container">
+                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
                     <div class="score">Score: ${state.score}</div>
-                    <div class="errors">Fouten: ${state.errors}</div>
+                    <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
@@ -2283,6 +2420,7 @@ function renderFindAllGame() {
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
+        clearTimer();
         state.currentScreen = 'menu';
         cleanupThreeJS();
         renderMenu();
@@ -2325,6 +2463,15 @@ function renderFindAllGame() {
             fallbackToCSS(container, 'findAll');
         }
     }
+    
+    // Initialize timer display correctly
+    const timerElement = document.querySelector('.timer-display');
+    if (timerElement && state.timeLimit === 0) {
+        timerElement.textContent = 'Time: None';
+    }
+    
+    // Start timer if time limit is set
+    startTimer();
 }
 
 /* ========================================
@@ -2382,10 +2529,12 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
         // Update score display
         updateScoreDisplay();
 
-        // Auto-advance to next note
+        // Clear timer and auto-advance to next note
+        clearTimer();
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
+            startTimer();
         }, 1500);
     } else {
         // Wrong answer - show red feedback
@@ -2451,7 +2600,8 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
             state.score += 10;
             updateScoreDisplay();
 
-            // Auto-advance to next note
+            // Clear timer and auto-advance to next note
+            clearTimer();
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
@@ -2466,6 +2616,7 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
                 document.querySelector('.target-note').textContent = state.targetNote;
                 document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
+                startTimer();
             }, 2000);
         }
     } else {
@@ -2524,7 +2675,8 @@ function handleTriadClick(stringIndex, fretIndex, note) {
                 state.score += 1;
                 updateScoreDisplay();
 
-                // Auto-advance to next triad
+                // Clear timer and auto-advance to next triad
+                clearTimer();
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
@@ -2535,6 +2687,7 @@ function handleTriadClick(stringIndex, fretIndex, note) {
 
                     // Update UI (we need to re-render the triad display)
                     renderTriadsGameUpdate();
+                    startTimer();
                 }, 2000);
             } else {
                 const remaining = 3 - state.clickedTriadNotes.length;
@@ -2679,8 +2832,9 @@ function renderTriadsGame() {
                     </div>
                 </div>
                 <div class="score-container">
+                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
                     <div class="score">Score: ${state.score}</div>
-                    <div class="errors">Fouten: ${state.errors}</div>
+                    <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
@@ -2697,6 +2851,7 @@ function renderTriadsGame() {
     `;
 
     document.getElementById('exitBtn').addEventListener('click', () => {
+        clearTimer();
         state.currentScreen = 'menu';
         cleanupThreeJS();
         renderMenu();
@@ -2739,6 +2894,15 @@ function renderTriadsGame() {
             fallbackToCSS(container, 'triads');
         }
     }
+    
+    // Initialize timer display correctly
+    const timerElement = document.querySelector('.timer-display');
+    if (timerElement && state.timeLimit === 0) {
+        timerElement.textContent = 'Time: None';
+    }
+    
+    // Start timer if time limit is set
+    startTimer();
 }
 
 function renderTriadsGameUpdate() {

@@ -196,6 +196,87 @@ body {
     opacity: 0.5;
 }
 
+/* Time Limit Control */
+.time-limit-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 2rem;
+}
+
+.time-limit-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.time-limit-text {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.time-limit-control {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.time-limit-control input[type="range"] {
+    width: 200px;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--glass-bg);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.time-limit-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--primary-green);
+    cursor: pointer;
+    border: 2px solid var(--text-primary);
+    box-shadow: 0 2px 8px rgba(0, 230, 118, 0.3);
+    transition: all 0.2s ease;
+}
+
+.time-limit-control input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 12px rgba(0, 230, 118, 0.5);
+}
+
+.time-limit-control input[type="range"]::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--primary-green);
+    cursor: pointer;
+    border: 2px solid var(--text-primary);
+    box-shadow: 0 2px 8px rgba(0, 230, 118, 0.3);
+    transition: all 0.2s ease;
+}
+
+.time-limit-control input[type="range"]::-moz-range-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 12px rgba(0, 230, 118, 0.5);
+}
+
+.time-limit-value {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--primary-green);
+    min-width: 60px;
+    text-align: center;
+}
+
 .mode-cards {
     display: flex;
     gap: 2rem;
@@ -362,6 +443,20 @@ body {
     flex-direction: column;
     align-items: flex-end;
     gap: 0.5rem;
+}
+
+.timer-display {
+    font-size: 1.5em;
+    font-weight: bold;
+    color: var(--primary-blue);
+    text-shadow: 0 0 20px rgba(41, 121, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+.timer-display.timer-warning {
+    color: var(--error-red);
+    text-shadow: 0 0 20px rgba(255, 23, 68, 0.5);
+    animation: pulse 1s infinite;
 }
 
 .score {
