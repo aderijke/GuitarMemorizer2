@@ -29,6 +29,8 @@ const state = {
     viewMode: '3d',
     // Debug mode: show/hide hitboxes and tooltip
     showDebug: false,
+    // Rotation enabled: allow rotating the 3D guitar view
+    rotationEnabled: false,
     // Triads mode
     targetTriad: null,
     clickedTriadNotes: [],
@@ -48,8 +50,12 @@ const state = {
     // Time limit in seconds (0 = no limit)
     timeLimit: 0,
     timeRemaining: 0,
+    // Enable time limit mode: if true, allow setting time limit with slider
+    enableTimeLimit: false,
     // Disabled frets: array of fret numbers that are disabled (e.g., [1, 2, 3, 4, 5, 6])
-    disabledFrets: []
+    disabledFrets: [],
+    // Enable disabled frets mode: if true, allow disabling frets with from/to sliders
+    enableDisabledFrets: false
 };
 
 /* ========================================
@@ -139,6 +145,10 @@ function getAllPositions(note) {
     for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
         // Start from fret 1 (skip open strings)
         for (let fretIndex = 1; fretIndex < NUM_FRETS; fretIndex++) {
+            // Skip disabled frets
+            if (isFretDisabled(fretIndex)) {
+                continue;
+            }
             if (getNoteAt(stringIndex, fretIndex) === note) {
                 positions.push({ string: stringIndex, fret: fretIndex });
             }
@@ -191,61 +201,87 @@ function renderMenu() {
         <div class="menu-screen">
             <h1 class="title">Guitar Fretboard Memorizer</h1>
             <p class="subtitle">Master the neck, one note at a time.</p>
-            <div class="view-toggle-container">
-                <label class="view-toggle-label">
-                    <span class="view-toggle-text">View Mode:</span>
-                    <div class="view-toggle-switch">
-                        <input type="checkbox" id="viewModeToggle" ${state.viewMode === '3d' ? 'checked' : ''}>
-                        <span class="toggle-slider">
-                            <span class="toggle-label-left">2D</span>
-                            <span class="toggle-label-right">3D</span>
-                        </span>
-                    </div>
-                </label>
-            </div>
-            <div class="time-limit-container">
-                <label class="time-limit-label">
-                    <span class="time-limit-text">Time Limit (seconds):</span>
-                    <div class="time-limit-control">
-                        <input type="range" id="timeLimitSlider" min="0" max="10" value="${state.timeLimit}" step="1">
-                        <span class="time-limit-value" id="timeLimitValue">${state.timeLimit === 0 ? 'None' : `${state.timeLimit}s`}</span>
-                    </div>
-                </label>
-            </div>
-            <div class="disabled-frets-container">
-                <label class="disabled-frets-label">
-                    <span class="disabled-frets-text">Disable Frets:</span>
-                    <div class="disabled-frets-controls">
-                        <div class="disabled-frets-range">
-                            <label class="range-label">
-                                <span>From:</span>
-                                <input type="range" id="disabledFretStart" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}" step="1">
-                                <span class="range-value" id="disabledFretStartValue">${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}</span>
-                            </label>
-                            <label class="range-label">
-                                <span>To:</span>
-                                <input type="range" id="disabledFretEnd" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}" step="1">
-                                <span class="range-value" id="disabledFretEndValue">${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}</span>
-                            </label>
+            <div class="menu-content">
+                <div class="menu-modes">
+                    <div class="mode-cards">
+                        <div class="mode-card" id="singleNoteMode">
+                            <h2>Single Note</h2>
+                            <p>Find random notes on the fretboard and build your muscle memory.</p>
                         </div>
-                        <button class="toggle-disabled-frets-btn" id="toggleDisabledFretsBtn">
-                            ${state.disabledFrets.length > 0 ? 'Enable All Frets' : 'Disable Frets'}
-                        </button>
+                        <div class="mode-card" id="findAllMode">
+                            <h2>Find All Instances</h2>
+                            <p>Locate every position of a specific note across the entire neck.</p>
+                        </div>
+                        <div class="mode-card" id="triadsMode">
+                            <h2>Chord Triads</h2>
+                            <p>Click all three notes of a chord triad to score a point.</p>
+                        </div>
                     </div>
-                </label>
-            </div>
-            <div class="mode-cards">
-                <div class="mode-card" id="singleNoteMode">
-                    <h2>Single Note</h2>
-                    <p>Find random notes on the fretboard and build your muscle memory.</p>
                 </div>
-                <div class="mode-card" id="findAllMode">
-                    <h2>Find All Instances</h2>
-                    <p>Locate every position of a specific note across the entire neck.</p>
-                </div>
-                <div class="mode-card" id="triadsMode">
-                    <h2>Chord Triads</h2>
-                    <p>Click all three notes of a chord triad to score a point.</p>
+                <div class="menu-settings">
+                    <h2 class="settings-title">Settings</h2>
+                    <div class="view-toggle-container">
+                        <label class="view-toggle-label">
+                            <span class="view-toggle-text">View Mode:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="viewModeToggle" ${state.viewMode === '3d' ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">2D</span>
+                                    <span class="toggle-label-right">3D</span>
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="time-limit-container">
+                        <label class="time-limit-label">
+                            <div class="view-toggle-container" style="width: 100%; justify-content: flex-start;">
+                                <label class="view-toggle-label">
+                                    <span class="view-toggle-text">Time Limit:</span>
+                                    <div class="view-toggle-switch">
+                                        <input type="checkbox" id="enableTimeLimitToggle" ${state.enableTimeLimit ? 'checked' : ''}>
+                                        <span class="toggle-slider">
+                                            <span class="toggle-label-left">Off</span>
+                                            <span class="toggle-label-right">On</span>
+                                        </span>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="time-limit-control" id="timeLimitControl" style="display: ${state.enableTimeLimit ? 'flex' : 'none'};">
+                                <input type="range" id="timeLimitSlider" min="1" max="10" value="${state.timeLimit > 0 ? state.timeLimit : 1}" step="1">
+                                <span class="time-limit-value" id="timeLimitValue">${state.timeLimit > 0 ? `${state.timeLimit}s` : '1s'}</span>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="disabled-frets-container">
+                        <label class="disabled-frets-label">
+                            <div class="view-toggle-container" style="width: 100%; justify-content: flex-start;">
+                                <label class="view-toggle-label">
+                                    <span class="view-toggle-text">Enable All Frets:</span>
+                                    <div class="view-toggle-switch">
+                                        <input type="checkbox" id="enableDisabledFretsToggle" ${state.enableDisabledFrets ? 'checked' : ''}>
+                                        <span class="toggle-slider">
+                                            <span class="toggle-label-left">Off</span>
+                                            <span class="toggle-label-right">On</span>
+                                        </span>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="disabled-frets-controls" id="disabledFretsControls" style="display: ${state.enableDisabledFrets ? 'flex' : 'none'};">
+                                <div class="disabled-frets-range">
+                                    <label class="range-label">
+                                        <span>From:</span>
+                                        <input type="range" id="disabledFretStart" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}" step="1">
+                                        <span class="range-value" id="disabledFretStartValue">${state.disabledFrets.length > 0 ? Math.min(...state.disabledFrets) : 1}</span>
+                                    </label>
+                                    <label class="range-label">
+                                        <span>To:</span>
+                                        <input type="range" id="disabledFretEnd" min="1" max="${NUM_FRETS - 1}" value="${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}" step="1">
+                                        <span class="range-value" id="disabledFretEndValue">${state.disabledFrets.length > 0 ? Math.max(...state.disabledFrets) : 1}</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </label>
+                    </div>
                 </div>
             </div>
         </div>
@@ -257,23 +293,75 @@ function renderMenu() {
         state.viewMode = e.target.checked ? '3d' : '2d';
     });
 
+    // Setup time limit toggle
+    const enableTimeLimitToggle = document.getElementById('enableTimeLimitToggle');
+    if (enableTimeLimitToggle) {
+        enableTimeLimitToggle.addEventListener('change', (e) => {
+            state.enableTimeLimit = e.target.checked;
+            
+            const timeLimitControl = document.getElementById('timeLimitControl');
+            if (timeLimitControl) {
+                timeLimitControl.style.display = state.enableTimeLimit ? 'flex' : 'none';
+            }
+            
+            if (!state.enableTimeLimit) {
+                // If toggle is off, disable time limit
+                state.timeLimit = 0;
+            } else {
+                // If toggle is on, set default time limit if it's 0
+                if (state.timeLimit === 0) {
+                    state.timeLimit = 1;
+                    const timeLimitSlider = document.getElementById('timeLimitSlider');
+                    const timeLimitValue = document.getElementById('timeLimitValue');
+                    if (timeLimitSlider) timeLimitSlider.value = 1;
+                    if (timeLimitValue) timeLimitValue.textContent = '1s';
+                }
+            }
+        });
+    }
+
     // Setup time limit slider
     const timeLimitSlider = document.getElementById('timeLimitSlider');
     const timeLimitValue = document.getElementById('timeLimitValue');
-    timeLimitSlider.addEventListener('input', (e) => {
-        const value = parseInt(e.target.value);
-        state.timeLimit = value;
-        timeLimitValue.textContent = value === 0 ? 'None' : `${value}s`;
-    });
+    if (timeLimitSlider && timeLimitValue) {
+        timeLimitSlider.addEventListener('input', (e) => {
+            if (!state.enableTimeLimit) return;
+            
+            const value = parseInt(e.target.value);
+            state.timeLimit = value;
+            timeLimitValue.textContent = `${value}s`;
+        });
+    }
+
+    // Setup disabled frets toggle
+    const enableDisabledFretsToggle = document.getElementById('enableDisabledFretsToggle');
+    if (enableDisabledFretsToggle) {
+        enableDisabledFretsToggle.addEventListener('change', (e) => {
+            state.enableDisabledFrets = e.target.checked;
+            
+            const disabledFretsControls = document.getElementById('disabledFretsControls');
+            if (disabledFretsControls) {
+                disabledFretsControls.style.display = state.enableDisabledFrets ? 'flex' : 'none';
+            }
+            
+            if (!state.enableDisabledFrets) {
+                // If toggle is off, enable all frets (clear disabled frets)
+                state.disabledFrets = [];
+            }
+        });
+    }
 
     // Setup disabled frets controls
     const disabledFretStart = document.getElementById('disabledFretStart');
     const disabledFretStartValue = document.getElementById('disabledFretStartValue');
     const disabledFretEnd = document.getElementById('disabledFretEnd');
     const disabledFretEndValue = document.getElementById('disabledFretEndValue');
-    const toggleDisabledFretsBtn = document.getElementById('toggleDisabledFretsBtn');
 
     function updateDisabledFrets() {
+        if (!state.enableDisabledFrets) return;
+        
+        if (!disabledFretStart || !disabledFretEnd) return;
+        
         const start = parseInt(disabledFretStart.value);
         const end = parseInt(disabledFretEnd.value);
         const minFret = Math.min(start, end);
@@ -284,25 +372,21 @@ function renderMenu() {
             state.disabledFrets.push(i);
         }
         
-        disabledFretStartValue.textContent = start;
-        disabledFretEndValue.textContent = end;
-        toggleDisabledFretsBtn.textContent = state.disabledFrets.length > 0 ? 'Enable All Frets' : 'Disable Frets';
+        if (disabledFretStartValue) disabledFretStartValue.textContent = start;
+        if (disabledFretEndValue) disabledFretEndValue.textContent = end;
     }
 
-    disabledFretStart.addEventListener('input', updateDisabledFrets);
-    disabledFretEnd.addEventListener('input', updateDisabledFrets);
+    if (disabledFretStart) {
+        disabledFretStart.addEventListener('input', updateDisabledFrets);
+    }
+    if (disabledFretEnd) {
+        disabledFretEnd.addEventListener('input', updateDisabledFrets);
+    }
     
-    toggleDisabledFretsBtn.addEventListener('click', () => {
-        if (state.disabledFrets.length > 0) {
-            state.disabledFrets = [];
-            toggleDisabledFretsBtn.textContent = 'Disable Frets';
-        } else {
-            updateDisabledFrets();
-        }
-    });
-
     // Initialize disabled frets display
-    updateDisabledFrets();
+    if (state.enableDisabledFrets) {
+        updateDisabledFrets();
+    }
 
     document.getElementById('singleNoteMode').addEventListener('click', startSingleNoteGame);
     document.getElementById('findAllMode').addEventListener('click', startFindAllGame);
@@ -386,6 +470,8 @@ function initThreeJS(container) {
         controls.minPolarAngle = Math.PI * 0.15; // ~27 degrees - prevents looking from below
         controls.target.copy(DEFAULT_CAMERA_TARGET);
         camera.lookAt(controls.target); // Make sure camera looks at target
+        // Set rotation based on state (default: false, so rotation disabled)
+        controls.enableRotate = state.rotationEnabled;
         controls.update();
         
         // Get current spherical coordinates from controls
@@ -1886,6 +1972,29 @@ function toggleDebugMode(enabled) {
     }
 }
 
+function toggleRotation(enabled) {
+    state.rotationEnabled = enabled;
+    
+    // Enable/disable rotation in OrbitControls
+    if (controls) {
+        controls.enableRotate = enabled;
+    }
+    
+    // Show/hide help text
+    updateRotationHelpText();
+}
+
+function updateRotationHelpText() {
+    const helpText = document.getElementById('rotationHelpText');
+    if (helpText) {
+        if (state.rotationEnabled) {
+            helpText.style.display = 'block';
+        } else {
+            helpText.style.display = 'none';
+        }
+    }
+}
+
 /**
  * Setup debug tooltip to show object names on mouse hover
  */
@@ -2308,8 +2417,8 @@ function clearTimer() {
 function startTimer() {
     clearTimer();
     
-    if (state.timeLimit === 0) {
-        // No time limit, hide timer
+    if (!state.enableTimeLimit || state.timeLimit === 0) {
+        // Time limit disabled or set to 0, hide timer
         const timerElement = document.querySelector('.timer-display');
         if (timerElement) {
             timerElement.style.display = 'none';
@@ -2407,18 +2516,39 @@ function renderSingleNoteGame() {
             <div class="game-header">
                 <div class="target-note">${state.targetNote}</div>
                 <div class="score-container">
-                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
+                    <div class="timer-display" style="display: ${state.enableTimeLimit && state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.enableTimeLimit && state.timeLimit > 0 ? state.timeRemaining + 's' : 'None'}</div>
                     <div class="score">Score: ${state.score}</div>
                     <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
-                    <label class="debug-toggle-label">
-                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
-                        <span>Debug Info</span>
-                    </label>
-                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    <div class="debug-toggle-controls">
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Rotation:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="rotationToggle" ${state.rotationEnabled ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Debug Info:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    </div>
+                    <div class="controls-help-text" id="rotationHelpText" style="display: ${state.rotationEnabled ? 'block' : 'none'};">
+                        Drag to rotate. Hold Shift and drag to pan.
+                    </div>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -2432,8 +2562,15 @@ function renderSingleNoteGame() {
         renderMenu();
     });
 
-    // Setup debug toggle and reset button (only for 3D view)
+    // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
+        const rotationToggle = document.getElementById('rotationToggle');
+        if (rotationToggle) {
+            rotationToggle.addEventListener('change', (e) => {
+                toggleRotation(e.target.checked);
+            });
+        }
+        
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
@@ -2494,18 +2631,39 @@ function renderFindAllGame() {
                     <div class="progress-info">Found: ${found} / ${total}</div>
                 </div>
                 <div class="score-container">
-                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
+                    <div class="timer-display" style="display: ${state.enableTimeLimit && state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.enableTimeLimit && state.timeLimit > 0 ? state.timeRemaining + 's' : 'None'}</div>
                     <div class="score">Score: ${state.score}</div>
                     <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
-                    <label class="debug-toggle-label">
-                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
-                        <span>Debug Info</span>
-                    </label>
-                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    <div class="debug-toggle-controls">
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Rotation:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="rotationToggle" ${state.rotationEnabled ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Debug Info:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    </div>
+                    <div class="controls-help-text" id="rotationHelpText" style="display: ${state.rotationEnabled ? 'block' : 'none'};">
+                        Drag to rotate. Hold Shift and drag to pan.
+                    </div>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -2519,8 +2677,15 @@ function renderFindAllGame() {
         renderMenu();
     });
 
-    // Setup debug toggle and reset button (only for 3D view)
+    // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
+        const rotationToggle = document.getElementById('rotationToggle');
+        if (rotationToggle) {
+            rotationToggle.addEventListener('change', (e) => {
+                toggleRotation(e.target.checked);
+            });
+        }
+        
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
@@ -2925,18 +3090,39 @@ function renderTriadsGame() {
                     </div>
                 </div>
                 <div class="score-container">
-                    <div class="timer-display" style="display: ${state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.timeLimit === 0 ? 'None' : state.timeLimit + 's'}</div>
+                    <div class="timer-display" style="display: ${state.enableTimeLimit && state.timeLimit > 0 ? 'block' : 'none'}">Time: ${state.enableTimeLimit && state.timeLimit > 0 ? state.timeRemaining + 's' : 'None'}</div>
                     <div class="score">Score: ${state.score}</div>
                     <div class="errors">Errors: ${state.errors}</div>
                 </div>
             </div>
             ${state.viewMode === '3d' ? `
                 <div class="debug-toggle-container">
-                    <label class="debug-toggle-label">
-                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
-                        <span>Debug Info</span>
-                    </label>
-                    <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    <div class="debug-toggle-controls">
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Rotation:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="rotationToggle" ${state.rotationEnabled ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <label class="debug-toggle-label">
+                            <span class="debug-toggle-text">Debug Info:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Off</span>
+                                    <span class="toggle-label-right">On</span>
+                                </span>
+                            </div>
+                        </label>
+                        <button class="reset-camera-btn" id="resetCameraBtn" title="Reset camera to default position">↻ Reset</button>
+                    </div>
+                    <div class="controls-help-text" id="rotationHelpText" style="display: ${state.rotationEnabled ? 'block' : 'none'};">
+                        Drag to rotate. Hold Shift and drag to pan.
+                    </div>
                 </div>
             ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
@@ -2950,8 +3136,15 @@ function renderTriadsGame() {
         renderMenu();
     });
 
-    // Setup debug toggle and reset button (only for 3D view)
+    // Setup rotation toggle, debug toggle and reset button (only for 3D view)
     if (state.viewMode === '3d') {
+        const rotationToggle = document.getElementById('rotationToggle');
+        if (rotationToggle) {
+            rotationToggle.addEventListener('change', (e) => {
+                toggleRotation(e.target.checked);
+            });
+        }
+        
         const debugToggle = document.getElementById('debugToggle');
         if (debugToggle) {
             debugToggle.addEventListener('change', (e) => {
