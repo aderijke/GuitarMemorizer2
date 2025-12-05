@@ -556,6 +556,20 @@ body {
     margin: 0 auto 2rem auto;
 }
 
+/* Grid layout for triad settings - 2 columns */
+.settings-container.triads-settings {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+    max-width: 500px;
+}
+
+/* Show Root Note toggle should span full width and be below the grid */
+.settings-container.triads-settings .view-toggle-container {
+    grid-column: 1 / -1;
+    margin-top: 0.5rem;
+}
+
 .setting-item {
     background: var(--glass-bg);
     backdrop-filter: blur(10px);
@@ -563,6 +577,11 @@ body {
     border-radius: 15px;
     padding: 1.5rem;
     transition: all 0.3s ease;
+}
+
+/* Compact setting items for triads */
+.settings-container.triads-settings .setting-item {
+    padding: 1rem;
 }
 
 .setting-item:hover {
@@ -595,6 +614,12 @@ body {
     flex-shrink: 0;
 }
 
+/* Compact checkbox for triads */
+.settings-container.triads-settings .checkbox-custom {
+    width: 24px;
+    height: 24px;
+}
+
 .setting-label input[type="checkbox"]:checked~.checkbox-custom {
     background: var(--primary-green);
     border-color: var(--primary-green);
@@ -615,6 +640,11 @@ body {
     font-size: 1.3rem;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+/* Compact setting name for triads */
+.settings-container.triads-settings .setting-name {
+    font-size: 1.1rem;
 }
 
 .start-game-btn {

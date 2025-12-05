@@ -12,6 +12,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 let scene, camera, renderer, controls;
 let guitarModel = null;
 let fretZones = []; // Array of clickable mesh zones for frets
+let fretMarkers = []; // Array of fret marker dots (3D spheres)
 let raycaster, mouse;
 let gameTimer = null; // Timer for time limit countdown
 
@@ -27,6 +28,8 @@ const state = {
     allPositions: [],
     // View mode: '3d' or '2d'
     viewMode: '3d',
+    // Model quality: 'low' or 'high' poly
+    modelQuality: 'low',
     // Debug mode: show/hide hitboxes and tooltip
     showDebug: false,
     // Rotation enabled: allow rotating the 3D guitar view
@@ -35,6 +38,8 @@ const state = {
     targetTriad: null,
     clickedTriadNotes: [],
     clickedTriadPositions: [],
+    // Root note position to highlight (if showTriadRootNote is enabled)
+    triadRootNotePosition: null,
     // Triads settings
     triadSettings: {
         major: true,
@@ -42,6 +47,8 @@ const state = {
         diminished: false,
         augmented: false
     },
+    // Show triad root note: if true, show a random position of the root note on the fretboard
+    showTriadRootNote: false,
     // 3D rotation
     rotation: {
         x: 35,
@@ -55,7 +62,9 @@ const state = {
     // Disabled frets: array of fret numbers that are disabled (e.g., [1, 2, 3, 4, 5, 6])
     disabledFrets: [],
     // Enable disabled frets mode: if true, allow disabling frets with from/to sliders
-    enableDisabledFrets: false
+    enableDisabledFrets: false,
+    // Timer started: track if timer has been started (starts on first click)
+    timerStarted: false
 };
 
 /* ========================================
@@ -192,6 +201,52 @@ function getRandomTriad() {
     };
 }
 
+function selectRandomRootNotePosition(rootNote) {
+    if (!state.showTriadRootNote || !rootNote) {
+        return null;
+    }
+    
+    const rootPositions = getAllPositions(rootNote);
+    if (rootPositions.length > 0) {
+        // Pick a random position
+        return rootPositions[Math.floor(Math.random() * rootPositions.length)];
+    }
+    return null;
+}
+
+function highlightRootNotePosition() {
+    // Clear previous root note highlight
+    if (fretZones && fretZones.length > 0) {
+        fretZones.forEach(zone => {
+            if (zone.userData.isRootNote) {
+                zone.userData.isRootNote = false;
+                zone.material.color.setHex(zone.userData.originalColor);
+                // Only reset opacity if not showing feedback or hovered
+                if (!zone.userData.isFeedback && !zone.userData.isHovered) {
+                    zone.material.opacity = zone.userData.originalOpacity;
+                }
+            }
+        });
+    }
+    
+    // Highlight root note position if enabled
+    if (state.showTriadRootNote && state.triadRootNotePosition && fretZones && fretZones.length > 0) {
+        const rootZone = fretZones.find(z =>
+            z.userData.stringIndex === state.triadRootNotePosition.string &&
+            z.userData.fretIndex === state.triadRootNotePosition.fret
+        );
+        
+        if (rootZone) {
+            rootZone.userData.isRootNote = true;
+            rootZone.material.color.setHex(0x00aaff); // Light blue for root note
+            rootZone.material.opacity = 0.6;
+            rootZone.visible = true;
+            // Store that this is a root note so it stays visible
+            rootZone.userData.originalOpacity = 0.6; // Update original opacity so it stays visible
+        }
+    }
+}
+
 /* ========================================
    UI RENDERING FUNCTIONS
    ======================================== */
@@ -232,6 +287,18 @@ function renderMenu() {
                             </div>
                         </label>
                     </div>
+                    <div class="view-toggle-container">
+                        <label class="view-toggle-label">
+                            <span class="view-toggle-text">3D Model Quality:</span>
+                            <div class="view-toggle-switch">
+                                <input type="checkbox" id="modelQualityToggle" ${state.modelQuality === 'high' ? 'checked' : ''}>
+                                <span class="toggle-slider">
+                                    <span class="toggle-label-left">Low</span>
+                                    <span class="toggle-label-right">High</span>
+                                </span>
+                            </div>
+                        </label>
+                    </div>
                     <div class="time-limit-container">
                         <label class="time-limit-label">
                             <div class="view-toggle-container" style="width: 100%; justify-content: flex-start;">
@@ -256,7 +323,7 @@ function renderMenu() {
                         <label class="disabled-frets-label">
                             <div class="view-toggle-container" style="width: 100%; justify-content: flex-start;">
                                 <label class="view-toggle-label">
-                                    <span class="view-toggle-text">Enable All Frets:</span>
+                                    <span class="view-toggle-text">Disable Frets:</span>
                                     <div class="view-toggle-switch">
                                         <input type="checkbox" id="enableDisabledFretsToggle" ${state.enableDisabledFrets ? 'checked' : ''}>
                                         <span class="toggle-slider">
@@ -291,6 +358,12 @@ function renderMenu() {
     const viewToggle = document.getElementById('viewModeToggle');
     viewToggle.addEventListener('change', (e) => {
         state.viewMode = e.target.checked ? '3d' : '2d';
+    });
+
+    // Setup model quality toggle
+    const modelQualityToggle = document.getElementById('modelQualityToggle');
+    modelQualityToggle.addEventListener('change', (e) => {
+        state.modelQuality = e.target.checked ? 'high' : 'low';
     });
 
     // Setup time limit toggle
@@ -695,7 +768,12 @@ function loadGuitarModel() {
         const mtlLoader = new MTLLoader();
         mtlLoader.setPath('Gibson 335/');
 
-        mtlLoader.load('Gibson 335_High_Poly.mtl', (materials) => {
+        // Determine which model to load based on state
+        const modelType = state.modelQuality === 'high' ? 'High_Poly' : 'Low_Poly';
+        const mtlFile = `Gibson 335_${modelType}.mtl`;
+        const objFile = `Gibson 335_${modelType}.obj`;
+
+        mtlLoader.load(mtlFile, (materials) => {
             materials.preload();
 
             const objLoader = new OBJLoader();
@@ -703,7 +781,7 @@ function loadGuitarModel() {
             objLoader.setPath('Gibson 335/');
 
             objLoader.load(
-                'Gibson 335_High_Poly.obj',
+                objFile,
                 (object) => {
                     guitarModel = object;
 
@@ -745,6 +823,11 @@ function loadGuitarModel() {
 
                     // Create fret zones after model is loaded
                     createFretZones();
+                    
+                    // Highlight root note position if in triads mode and option is enabled
+                    if (state.currentScreen === 'triads') {
+                        highlightRootNotePosition();
+                    }
 
                     resolve(guitarModel);
                 },
@@ -1789,6 +1872,9 @@ function createFretZones() {
     
     // Setup mouse over effects for hitboxes
     setupHitboxHoverEffects();
+    
+    // Create fret markers (dots) on the fretboard
+    createFretMarkers();
 }
 
 // Fallback function for when string geometry is not available
@@ -1937,6 +2023,146 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
     
     // Setup mouse over effects for hitboxes
     setupHitboxHoverEffects();
+    
+    // Create fret markers (dots) on the fretboard
+    createFretMarkers();
+}
+
+function createFretMarkers() {
+    // Clear existing markers
+    fretMarkers.forEach(marker => scene.remove(marker));
+    fretMarkers = [];
+    
+    // Fret numbers that should have markers (standard guitar fret markers)
+    const markerFrets = [3, 5, 7, 9, 12, 15, 17, 19, 21];
+    
+    // Analyze the model to get fret positions
+    const analysis = analyzeGuitarModel();
+    
+    if (!analysis) {
+        // Fallback to old hardcoded positions
+        const stringSpacing = 0.05;
+        const fretSpacing = 0.20;
+        const neckStartZ = -2.8;
+        const neckStartY = -0.49;
+        const slope = 0.014;
+        const neckCenterZ = 0; // Center of strings
+        
+        for (const fretIndex of markerFrets) {
+            if (fretIndex >= NUM_FRETS) continue;
+            
+            // Calculate position in the center of the fret space (between frets)
+            const fretX = neckStartZ + (fretIndex * fretSpacing);
+            let centerX = fretX;
+            
+            if (fretIndex < NUM_FRETS - 1) {
+                const nextFretX = neckStartZ + ((fretIndex + 1) * fretSpacing);
+                centerX = (fretX + nextFretX) / 2;
+            } else if (fretIndex > 1) {
+                const prevFretX = neckStartZ + ((fretIndex - 1) * fretSpacing);
+                centerX = (fretX + prevFretX) / 2;
+            }
+            
+            const centerY = neckStartY + (fretIndex * slope) - 0.0075; // Half sunk into fretboard (radius is 0.015, so -0.0075 is half)
+            const centerZ = neckCenterZ;
+            
+            if (fretIndex === 12) {
+                // Double dots for 12th fret (top and bottom)
+                const dotSpacing = stringSpacing * 2.5; // Space between dots
+                createMarkerDot(centerX, centerY, centerZ - dotSpacing / 2);
+                createMarkerDot(centerX, centerY, centerZ + dotSpacing / 2);
+            } else {
+                // Single dot centered
+                createMarkerDot(centerX, centerY, centerZ);
+            }
+        }
+        return;
+    }
+    
+    // Use analyzed positions
+    const { fretPositions, neckRegion } = analysis;
+    
+    if (!fretPositions || fretPositions.length === 0) {
+        return;
+    }
+    
+    // Get string positions to calculate center Z
+    const stringObjects = extractStringObjects();
+    let centerZ = neckRegion.centerZ;
+    
+    if (stringObjects && stringObjects.length >= 6) {
+        // Calculate center Z from string positions
+        const stringPositionsByFret = analyzeStringGeometry(stringObjects, fretPositions, neckRegion);
+        if (stringPositionsByFret && stringPositionsByFret.length > 0) {
+            const firstFretPositions = stringPositionsByFret[0];
+            if (firstFretPositions && firstFretPositions.length >= 6) {
+                const firstStringZ = firstFretPositions[0].z;
+                const lastStringZ = firstFretPositions[5].z;
+                centerZ = (firstStringZ + lastStringZ) / 2;
+            }
+        }
+    }
+    
+    // Create markers for each marked fret
+    for (const fretIndex of markerFrets) {
+        if (fretIndex >= NUM_FRETS) continue;
+        
+        // Find the fret position index (fretIndex 1 = position 0, fretIndex 2 = position 1, etc.)
+        const fretPosIndex = fretIndex - 1;
+        
+        if (fretPosIndex < 0 || fretPosIndex >= fretPositions.length) {
+            continue;
+        }
+        
+        // Calculate position in the center of the fret space (between frets)
+        let centerX, centerY;
+        
+        if (fretIndex === 1) {
+            // First fret: between nut and fret 1
+            const nutX = neckRegion.nutX || neckRegion.startX;
+            const fret1X = fretPositions[0].x;
+            centerX = (nutX + fret1X) / 2;
+        } else if (fretPosIndex < fretPositions.length) {
+            // Between previous fret and current fret
+            const prevFretX = fretPositions[fretPosIndex - 1].x;
+            const currentFretX = fretPositions[fretPosIndex].x;
+            centerX = (prevFretX + currentFretX) / 2;
+        } else {
+            continue;
+        }
+        
+        // Get Y position from fret position or estimate
+        centerY = fretPositions[fretPosIndex].y - 0.0045; // Half sunk into fretboard (radius is 0.015, so -0.0075 is half)
+        
+        if (fretIndex === 12) {
+            // Double dots for 12th fret (top and bottom)
+            const dotSpacing = neckRegion.width * 0.3; // Space between dots
+            createMarkerDot(centerX, centerY, centerZ - dotSpacing / 2);
+            createMarkerDot(centerX, centerY, centerZ + dotSpacing / 2);
+        } else {
+            // Single dot centered
+            createMarkerDot(centerX, centerY, centerZ);
+        }
+    }
+}
+
+function createMarkerDot(x, y, z) {
+    // Create a small white sphere for the fret marker
+    const geometry = new THREE.SphereGeometry(0.015, 16, 16); // Small sphere, 0.015 radius
+    const material = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: 0x222222, // Slight glow
+        metalness: 0.3,
+        roughness: 0.7
+    });
+    
+    const marker = new THREE.Mesh(geometry, material);
+    marker.position.set(x, y, z);
+    marker.castShadow = true;
+    marker.receiveShadow = true;
+    
+    scene.add(marker);
+    fretMarkers.push(marker);
 }
 
 /**
@@ -1955,6 +2181,10 @@ function toggleDebugMode(enabled) {
                     // Disabled frets are always slightly visible
                     zone.material.opacity = 0.3;
                     zone.userData.originalOpacity = 0.3;
+                } else if (zone.userData.isRootNote) {
+                    // Keep root note visible regardless of debug mode
+                    zone.material.opacity = 0.6;
+                    zone.userData.originalOpacity = 0.6;
                 } else {
                     zone.material.opacity = enabled ? 0.6 : 0;
                     zone.userData.originalOpacity = enabled ? 0.6 : 0;
@@ -2198,6 +2428,7 @@ function cleanupThreeJS() {
     controls = null;
     guitarModel = null;
     fretZones = [];
+    fretMarkers = [];
 }
 
 
@@ -2210,7 +2441,11 @@ function fallbackToCSS(container, gameMode) {
     if (gameMode === 'findAll') {
         highlighted = state.foundPositions;
     } else if (gameMode === 'triads') {
-        highlighted = state.clickedTriadPositions;
+        highlighted = [...state.clickedTriadPositions];
+        // Add root note position if option is enabled
+        if (state.showTriadRootNote && state.triadRootNotePosition) {
+            highlighted.push(state.triadRootNotePosition);
+        }
     }
 
     container.innerHTML = renderFretboard(highlighted);
@@ -2447,6 +2682,14 @@ function startTimer() {
     }, 1000);
 }
 
+function startTimerOnFirstClick() {
+    // Start timer only if it hasn't been started yet
+    if (!state.timerStarted && state.enableTimeLimit && state.timeLimit > 0) {
+        state.timerStarted = true;
+        startTimer();
+    }
+}
+
 function updateTimerDisplay() {
     const timerElement = document.querySelector('.timer-display');
     if (timerElement) {
@@ -2469,12 +2712,21 @@ function handleTimeOut() {
     state.errors += 1;
     updateErrorsDisplay();
     
+    // Reset timer started flag for next question
+    state.timerStarted = false;
+    
     // Move to next task based on current game mode
     if (state.currentScreen === 'singleNote') {
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
-            startTimer();
+            // Timer will start again on first click
+            if (state.enableTimeLimit && state.timeLimit > 0) {
+                const timerElement = document.querySelector('.timer-display');
+                if (timerElement) {
+                    timerElement.textContent = `Time: ${state.timeLimit}s`;
+                }
+            }
         }, 1500);
     } else if (state.currentScreen === 'findAll') {
         setTimeout(() => {
@@ -2491,7 +2743,13 @@ function handleTimeOut() {
             
             document.querySelector('.target-note').textContent = state.targetNote;
             document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
-            startTimer();
+            // Timer will start again on first click
+            if (state.enableTimeLimit && state.timeLimit > 0) {
+                const timerElement = document.querySelector('.timer-display');
+                if (timerElement) {
+                    timerElement.textContent = `Time: ${state.timeLimit}s`;
+                }
+            }
         }, 1500);
     } else if (state.currentScreen === 'triads') {
         setTimeout(() => {
@@ -2499,11 +2757,32 @@ function handleTimeOut() {
             state.clickedTriadNotes = [];
             state.clickedTriadPositions = [];
             
-            // Reset all zones
-            fretZones.forEach(z => z.material.opacity = 0);
+            // Set new root note position if option is enabled
+            state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
+            
+            // If root note is shown, automatically mark it as found
+            if (state.showTriadRootNote && state.triadRootNotePosition && state.targetTriad) {
+                state.clickedTriadNotes.push(state.targetTriad.root);
+                state.clickedTriadPositions.push(state.triadRootNotePosition);
+            }
+            
+            // Reset all zones first
+            fretZones.forEach(z => {
+                z.material.opacity = 0;
+                z.userData.isRootNote = false;
+            });
+            
+            // Then highlight root note position (this will override the reset for the root note)
+            highlightRootNotePosition();
             
             renderTriadsGameUpdate();
-            startTimer();
+            // Timer will start again on first click
+            if (state.enableTimeLimit && state.timeLimit > 0) {
+                const timerElement = document.querySelector('.timer-display');
+                if (timerElement) {
+                    timerElement.textContent = `Time: ${state.timeLimit}s`;
+                }
+            }
         }, 1500);
     }
 }
@@ -2613,8 +2892,16 @@ function renderSingleNoteGame() {
         timerElement.textContent = 'Time: None';
     }
     
-    // Start timer if time limit is set
-    startTimer();
+    // Reset timer started flag - timer will start on first click
+    state.timerStarted = false;
+    
+    // Show timer but don't start it yet
+    if (state.enableTimeLimit && state.timeLimit > 0) {
+        if (timerElement) {
+            timerElement.style.display = 'block';
+            timerElement.textContent = `Time: ${state.timeLimit}s`;
+        }
+    }
 }
 
 function renderFindAllGame() {
@@ -2728,8 +3015,16 @@ function renderFindAllGame() {
         timerElement.textContent = 'Time: None';
     }
     
-    // Start timer if time limit is set
-    startTimer();
+    // Reset timer started flag - timer will start on first click
+    state.timerStarted = false;
+    
+    // Show timer but don't start it yet
+    if (state.enableTimeLimit && state.timeLimit > 0) {
+        if (timerElement) {
+            timerElement.style.display = 'block';
+            timerElement.textContent = `Time: ${state.timeLimit}s`;
+        }
+    }
 }
 
 /* ========================================
@@ -2757,6 +3052,9 @@ function startFindAllGame() {
    THREE.JS CLICK HANDLERS
    ======================================== */
 function handleSingleNoteClick(stringIndex, fretIndex, note) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     const frequency = getFrequencyAt(stringIndex, fretIndex);
 
     // Play sound
@@ -2789,10 +3087,17 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
 
         // Clear timer and auto-advance to next note
         clearTimer();
+        state.timerStarted = false; // Reset timer started flag for next question
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
-            startTimer();
+            // Timer will start again on first click
+            if (state.enableTimeLimit && state.timeLimit > 0) {
+                const timerElement = document.querySelector('.timer-display');
+                if (timerElement) {
+                    timerElement.textContent = `Time: ${state.timeLimit}s`;
+                }
+            }
         }, 1500);
     } else {
         // Wrong answer - show red feedback
@@ -2820,6 +3125,9 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
 }
 
 function handleFindAllClick(stringIndex, fretIndex, note) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     // Check if already found
     const alreadyFound = state.foundPositions.some(
         pos => pos.string === stringIndex && pos.fret === fretIndex
@@ -2860,6 +3168,7 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
             // Clear timer and auto-advance to next note
             clearTimer();
+            state.timerStarted = false; // Reset timer started flag for next question
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
@@ -2874,7 +3183,13 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
                 document.querySelector('.target-note').textContent = state.targetNote;
                 document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
-                startTimer();
+                // Timer will start again on first click
+                if (state.enableTimeLimit && state.timeLimit > 0) {
+                    const timerElement = document.querySelector('.timer-display');
+                    if (timerElement) {
+                        timerElement.textContent = `Time: ${state.timeLimit}s`;
+                    }
+                }
             }, 2000);
         }
     } else {
@@ -2903,28 +3218,39 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 }
 
 function handleTriadClick(stringIndex, fretIndex, note) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     const frequency = getFrequencyAt(stringIndex, fretIndex);
     playGuitarTone(frequency);
 
     const triad = state.targetTriad;
 
-    // Check if this note is part of the triad
-    if (triad.notes.includes(note)) {
-        // Check if we already clicked this note
-        if (!state.clickedTriadNotes.includes(note)) {
-            state.clickedTriadNotes.push(note);
-            state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
+        // Check if this note is part of the triad
+        if (triad.notes.includes(note)) {
+            // Check if we already clicked this note
+            if (!state.clickedTriadNotes.includes(note)) {
+                state.clickedTriadNotes.push(note);
+                state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
 
-            // Highlight the zone (green for correct)
-            const zone = fretZones.find(z =>
-                z.userData.stringIndex === stringIndex &&
-                z.userData.fretIndex === fretIndex
-            );
-            if (zone) {
-                zone.userData.isFeedback = true;
-                zone.material.opacity = 0.7;
-                zone.material.color.setHex(0x00ff00); // Green for correct
-            }
+                // Highlight the zone (green for correct)
+                const zone = fretZones.find(z =>
+                    z.userData.stringIndex === stringIndex &&
+                    z.userData.fretIndex === fretIndex
+                );
+                if (zone) {
+                    zone.userData.isFeedback = true;
+                    zone.userData.isRootNote = false; // Remove root note highlight if this was the root
+                    zone.material.opacity = 0.7;
+                    zone.material.color.setHex(0x00ff00); // Green for correct
+                }
+                
+                // If this was the root note position, clear it
+                if (state.triadRootNotePosition && 
+                    state.triadRootNotePosition.string === stringIndex && 
+                    state.triadRootNotePosition.fret === fretIndex) {
+                    state.triadRootNotePosition = null;
+                }
 
             // Check if all notes are clicked
             if (state.clickedTriadNotes.length === 3) {
@@ -2935,17 +3261,39 @@ function handleTriadClick(stringIndex, fretIndex, note) {
 
                 // Clear timer and auto-advance to next triad
                 clearTimer();
+                state.timerStarted = false; // Reset timer started flag for next question
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
                     state.clickedTriadPositions = [];
+                    
+                    // Set new root note position if option is enabled
+                    state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
+                    
+                    // If root note is shown, automatically mark it as found
+                    if (state.showTriadRootNote && state.triadRootNotePosition && state.targetTriad) {
+                        state.clickedTriadNotes.push(state.targetTriad.root);
+                        state.clickedTriadPositions.push(state.triadRootNotePosition);
+                    }
 
-                    // Reset all zones
-                    fretZones.forEach(z => z.material.opacity = 0);
+                    // Reset all zones first
+                    fretZones.forEach(z => {
+                        z.material.opacity = 0;
+                        z.userData.isRootNote = false;
+                    });
+                    
+                    // Then highlight root note position (this will override the reset for the root note)
+                    highlightRootNotePosition();
 
                     // Update UI (we need to re-render the triad display)
                     renderTriadsGameUpdate();
-                    startTimer();
+                    // Timer will start again on first click
+                    if (state.enableTimeLimit && state.timeLimit > 0) {
+                        const timerElement = document.querySelector('.timer-display');
+                        if (timerElement) {
+                            timerElement.textContent = `Time: ${state.timeLimit}s`;
+                        }
+                    }
                 }, 2000);
             } else {
                 const remaining = 3 - state.clickedTriadNotes.length;
@@ -2997,6 +3345,16 @@ function startTriadsGameFromSettings() {
     state.clickedTriadPositions = [];
     state.score = 0;
     state.errors = 0;
+    
+    // Set root note position if option is enabled
+    state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
+    
+    // If root note is shown, automatically mark it as found
+    if (state.showTriadRootNote && state.triadRootNotePosition && state.targetTriad) {
+        state.clickedTriadNotes.push(state.targetTriad.root);
+        state.clickedTriadPositions.push(state.triadRootNotePosition);
+    }
+    
     renderTriadsGame();
 }
 
@@ -3009,7 +3367,7 @@ function renderTriadsSettings() {
             <button class="exit-btn" id="exitBtn">← Back</button>
             <h1 class="title">Chord Triads Settings</h1>
             <p class="subtitle">Choose which chord types to practice</p>
-            <div class="settings-container">
+            <div class="settings-container triads-settings">
                 <div class="setting-item">
                     <label class="setting-label">
                         <input type="checkbox" id="setting-major" ${settings.major ? 'checked' : ''}>
@@ -3038,6 +3396,18 @@ function renderTriadsSettings() {
                         <span class="setting-name">Augmented</span>
                     </label>
                 </div>
+                <div class="view-toggle-container">
+                    <label class="view-toggle-label">
+                        <span class="view-toggle-text">Show Root Note:</span>
+                        <div class="view-toggle-switch">
+                            <input type="checkbox" id="showRootNoteToggle" ${state.showTriadRootNote ? 'checked' : ''}>
+                            <span class="toggle-slider">
+                                <span class="toggle-label-left">Off</span>
+                                <span class="toggle-label-right">On</span>
+                            </span>
+                        </div>
+                    </label>
+                </div>
             </div>
             <button class="start-game-btn" id="startGameBtn">Start Game</button>
         </div>
@@ -3055,6 +3425,14 @@ function renderTriadsSettings() {
             state.triadSettings[type] = e.target.checked;
         });
     });
+
+    // Add change listener for show root note toggle
+    const showRootNoteToggle = document.getElementById('showRootNoteToggle');
+    if (showRootNoteToggle) {
+        showRootNoteToggle.addEventListener('change', (e) => {
+            state.showTriadRootNote = e.target.checked;
+        });
+    }
 
     document.getElementById('startGameBtn').addEventListener('click', () => {
         // Check if at least one type is enabled
@@ -3172,6 +3550,8 @@ function renderTriadsGame() {
         if (initThreeJS(container)) {
             loadGuitarModel().then(() => {
                 setupFretClickHandler();
+                // Highlight root note position after setup
+                highlightRootNotePosition();
             }).catch(error => {
                 showFeedback('error', 'Failed to load 3D model. Using 2D view.');
                 fallbackToCSS(container, 'triads');
@@ -3187,8 +3567,16 @@ function renderTriadsGame() {
         timerElement.textContent = 'Time: None';
     }
     
-    // Start timer if time limit is set
-    startTimer();
+    // Reset timer started flag - timer will start on first click
+    state.timerStarted = false;
+    
+    // Show timer but don't start it yet
+    if (state.enableTimeLimit && state.timeLimit > 0) {
+        if (timerElement) {
+            timerElement.style.display = 'block';
+            timerElement.textContent = `Time: ${state.timeLimit}s`;
+        }
+    }
 }
 
 function renderTriadsGameUpdate() {
@@ -3223,6 +3611,9 @@ function renderTriadsGameUpdate() {
    FALLBACK DOM EVENT HANDLERS
    ======================================== */
 function handleSingleNoteDOMClick(event) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
@@ -3257,6 +3648,9 @@ function handleSingleNoteDOMClick(event) {
 }
 
 function handleFindAllDOMClick(event) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
@@ -3303,6 +3697,9 @@ function handleFindAllDOMClick(event) {
 }
 
 function handleTriadDOMClick(event) {
+    // Start timer on first click
+    startTimerOnFirstClick();
+    
     const fret = event.currentTarget;
     const stringIndex = parseInt(fret.dataset.string);
     const fretIndex = parseInt(fret.dataset.fret);
@@ -3320,8 +3717,18 @@ function handleTriadDOMClick(event) {
 
     const triad = state.targetTriad;
     if (triad.notes.includes(clickedNote)) {
+        // Check if we already clicked this note (including if it's the root note that's shown)
         if (!state.clickedTriadNotes.includes(clickedNote)) {
             state.clickedTriadNotes.push(clickedNote);
+            state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
+            
+            // If this was the root note position, clear it
+            if (state.triadRootNotePosition && 
+                state.triadRootNotePosition.string === stringIndex && 
+                state.triadRootNotePosition.fret === fretIndex) {
+                state.triadRootNotePosition = null;
+            }
+            
             if (state.clickedTriadNotes.length === 3) {
                 state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
                 showFeedback('success', 'Perfect! All notes found!');
@@ -3331,6 +3738,26 @@ function handleTriadDOMClick(event) {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
                     state.clickedTriadPositions = [];
+                    
+                    // Set new root note position if option is enabled
+                    state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
+                    
+                    // If root note is shown, automatically mark it as found
+                    if (state.showTriadRootNote && state.triadRootNotePosition && state.targetTriad) {
+                        state.clickedTriadNotes.push(state.targetTriad.root);
+                        state.clickedTriadPositions.push(state.triadRootNotePosition);
+                    }
+                    
+                    // Reset all zones first (only in 3D mode)
+                    if (state.viewMode === '3d' && fretZones && fretZones.length > 0) {
+                        fretZones.forEach(z => {
+                            z.material.opacity = 0;
+                            z.userData.isRootNote = false;
+                        });
+                        // Then highlight root note position (this will override the reset for the root note)
+                        highlightRootNotePosition();
+                    }
+                    
                     renderTriadsGame();
                 }, 2000);
             } else {
