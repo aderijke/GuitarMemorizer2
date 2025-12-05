@@ -25,6 +25,8 @@ const state = {
     allPositions: [],
     // View mode: '3d' or '2d'
     viewMode: '3d',
+    // Debug mode: show/hide hitboxes and tooltip
+    showDebug: false,
     // Triads mode
     targetTriad: null,
     clickedTriadNotes: [],
@@ -66,7 +68,7 @@ const STRING_TUNING = [
     { note: 'E', octave: 2, baseFreq: 82.41 }    // Low E (String 6)
 ];
 
-const NUM_FRETS = 13; // 0-12
+const NUM_FRETS = 23; // 0-22 (22 frets)
 
 /* ========================================
    WEB AUDIO API
@@ -806,11 +808,12 @@ function extractFretPositionsFromGeometry(neckRegion) {
                 }
             }
             
+            // Return up to 22 frets (NUM_FRETS - 1 = 22 for 22 frets)
             if (bestFrets.length >= NUM_FRETS - 1) {
-                console.log(`Extracted ${bestFrets.length} fret positions from geometry analysis`);
+                console.log(`Extracted ${bestFrets.length} fret positions from geometry analysis, using first ${NUM_FRETS - 1}`);
                 return bestFrets.slice(0, NUM_FRETS - 1);
             } else if (bestFrets.length >= 8) {
-                console.log(`Found ${bestFrets.length} frets using geometry analysis`);
+                console.log(`Found ${bestFrets.length} frets using geometry analysis (target: ${NUM_FRETS - 1})`);
                 return bestFrets;
             } else {
                 console.log(`Geometry analysis found only ${bestFrets.length} frets, trying edge analysis...`);
@@ -1005,11 +1008,12 @@ function extractFretPositionsFromGeometry(neckRegion) {
             console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, Y=${fret.y.toFixed(3)}, Z=${fret.z.toFixed(3)}`);
         });
         
+        // Return up to 22 frets (NUM_FRETS - 1 = 22 for 22 frets)
         if (validFrets.length >= NUM_FRETS - 1) {
-            console.log(`Extracted ${validFrets.length} fret positions from fret container using raycasting`);
+            console.log(`Extracted ${validFrets.length} fret positions from fret container using raycasting, using first ${NUM_FRETS - 1}`);
             return validFrets.slice(0, NUM_FRETS - 1);
         } else if (validFrets.length > 0) {
-            console.log(`Found ${validFrets.length} frets using raycasting`);
+            console.log(`Found ${validFrets.length} frets using raycasting (target: ${NUM_FRETS - 1})`);
             return validFrets;
         }
     }
@@ -1174,14 +1178,14 @@ function analyzeStringGeometry(stringObjects, fretPositions, neckRegion) {
             // First fret: between nut and fret 1
             const fretStartX = nutX;
             const fretEndX = fretPositions[0].x;
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             const boxWidth = (fretEndX - fretStartX) - (2 * margin);
             targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
         } else {
             // All other frets: between previous fret and current fret
             const fretStartX = fretPositions[fretIndex - 1].x;
             const fretEndX = fretPositions[fretIndex].x;
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             const boxWidth = (fretEndX - fretStartX) - (2 * margin);
             targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
         }
@@ -1303,8 +1307,8 @@ function createFretZones() {
                 // Width: exact distance between frets
                 // Height: small height above fretboard
                 const boxHeight = 0.08;
-                // Depth: slightly wider than a string (not the space between strings)
-                const boxDepth = Math.min(stringSpacing * 0.3, 0.02); // Max 30% of string spacing or 0.02
+                // Depth: wider for easier clicking (Z-direction, across strings)
+                const boxDepth = Math.min(stringSpacing * 0.6, 0.04); // Max 60% of string spacing or 0.04 (wider for easier clicking)
 
                 const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
                 const material = new THREE.MeshBasicMaterial({
@@ -1318,6 +1322,7 @@ function createFretZones() {
                 zone.position.y = neckStartY + (fretIndex * slope);
                 // Position exactly on the string
                 zone.position.z = (stringIndex - 2.5) * stringSpacing;
+                zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
 
                 zone.userData = {
                     stringIndex,
@@ -1372,6 +1377,7 @@ function createFretZones() {
     // fretIndex 0 = between nut and fret 1  
     // fretIndex 1 = between fret 1 and fret 2
     // etc.
+    // Create hitboxes for all detected frets (up to 22 frets = 22 hitbox positions)
     for (let fretIndex = 0; fretIndex < stringPositionsByFret.length && fretIndex < NUM_FRETS - 1; fretIndex++) {
         const nutX = neckRegion.nutX || neckRegion.startX;
 
@@ -1391,7 +1397,7 @@ function createFretZones() {
             }
             
             // Make box slightly smaller to avoid overlapping with nut and fret
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             boxWidth = (fretEndX - fretStartX) - (2 * margin);
             targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
         } else {
@@ -1411,7 +1417,7 @@ function createFretZones() {
             }
             
             // Make box slightly smaller to avoid overlapping with frets
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             boxWidth = (fretEndX - fretStartX) - (2 * margin);
             targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
         }
@@ -1447,16 +1453,16 @@ function createFretZones() {
             if (fretIndex < 2 && stringIndex < 2) {
                 console.log(`Hitbox Fret ${fretIndex + 1}, String ${stringIndex + 1}: posX=${posX.toFixed(3)}, posY=${posY.toFixed(3)}, posZ=${posZ.toFixed(3)}`);
             }
-            // Calculate box depth
-            let boxDepth = 0.012;
+            // Calculate box depth (Z-direction, across strings) - make wider for easier clicking
+            let boxDepth = 0.035; // Increased default depth
             if (stringIndex < STRING_TUNING.length - 1 && stringPositions[stringIndex + 1]) {
                 const nextStringZ = stringPositions[stringIndex + 1].z;
-                boxDepth = Math.min(Math.abs(nextStringZ - posZ) * 0.3, 0.02);
+                boxDepth = Math.min(Math.abs(nextStringZ - posZ) * 0.6, 0.04); // Increased multiplier and max
             } else if (stringIndex > 0 && stringPositions[stringIndex - 1]) {
                 const prevStringZ = stringPositions[stringIndex - 1].z;
-                boxDepth = Math.min(Math.abs(posZ - prevStringZ) * 0.3, 0.02);
+                boxDepth = Math.min(Math.abs(posZ - prevStringZ) * 0.6, 0.04); // Increased multiplier and max
             }
-            boxDepth = Math.max(0.008, boxDepth);
+            boxDepth = Math.max(0.02, boxDepth); // Increased minimum
 
             const boxHeight = 0.04;
 
@@ -1470,6 +1476,7 @@ function createFretZones() {
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
+            zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
 
             zone.userData = {
                 stringIndex,
@@ -1551,21 +1558,21 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
             fretStartX = fretPositions[fretIndex].x;
             fretEndX = fretPositions[fretIndex + 1].x;
             // Make box slightly smaller to avoid overlapping with frets
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             boxWidth = (fretEndX - fretStartX) - (2 * margin);
             posX = fretStartX + margin + boxWidth / 2; // Center in the space between
         } else if (fretIndex > 0) {
             fretStartX = fretPositions[fretIndex - 1].x;
             fretEndX = fretPositions[fretIndex].x;
             // Make box slightly smaller to avoid overlapping with frets
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             boxWidth = (fretEndX - fretStartX) - (2 * margin);
             posX = fretStartX + margin + boxWidth / 2; // Center in the space between
         } else {
             fretStartX = nutX;
             fretEndX = fretPositions[0].x;
             // Make box slightly smaller to avoid overlapping with nut and fret
-            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const margin = (fretEndX - fretStartX) * 0.05; // 5% margin on each side (reduced for wider hitboxes)
             boxWidth = (fretEndX - fretStartX) - (2 * margin);
             posX = fretStartX + margin + boxWidth / 2; // Center in the space between
         }
@@ -1585,15 +1592,16 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
             const posY = avgY + 0.01;
             const posZ = stringZ;
 
-            let boxDepth = 0.012;
+            // Calculate box depth (Z-direction, across strings) - make wider for easier clicking
+            let boxDepth = 0.025; // Increased default depth
             if (stringIndex < STRING_TUNING.length - 1) {
                 const nextStringZ = currentZMin + ((stringIndex + 1) * currentStringSpacing);
-                boxDepth = Math.min(Math.abs(nextStringZ - stringZ) * 0.3, 0.02);
+                boxDepth = Math.min(Math.abs(nextStringZ - stringZ) * 0.6, 0.04); // Increased multiplier and max
             } else if (stringIndex > 0) {
                 const prevStringZ = currentZMin + ((stringIndex - 1) * currentStringSpacing);
-                boxDepth = Math.min(Math.abs(stringZ - prevStringZ) * 0.3, 0.02);
+                boxDepth = Math.min(Math.abs(stringZ - prevStringZ) * 0.6, 0.04); // Increased multiplier and max
             }
-            boxDepth = Math.max(0.008, boxDepth);
+            boxDepth = Math.max(0.02, boxDepth); // Increased minimum
 
             const boxHeight = 0.04;
 
@@ -1607,6 +1615,7 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
 
             const zone = new THREE.Mesh(geometry, material);
             zone.position.set(posX, posY, posZ);
+            zone.visible = state.showDebug; // Hide by default, show only when debug is enabled
 
             zone.userData = {
                 stringIndex,
@@ -1623,38 +1632,71 @@ function useFallbackHitboxes(fretPositions, neckRegion) {
 }
 
 /**
+ * Toggle debug mode (show/hide hitboxes and tooltip)
+ */
+function toggleDebugMode(enabled) {
+    state.showDebug = enabled;
+    
+    // Show/hide hitboxes
+    if (fretZones && fretZones.length > 0) {
+        fretZones.forEach(zone => {
+            zone.visible = enabled;
+        });
+    }
+    
+    // Show/hide tooltip
+    const tooltip = document.getElementById('debug-tooltip');
+    if (tooltip) {
+        if (!enabled) {
+            tooltip.style.display = 'none';
+        }
+    }
+}
+
+/**
  * Setup debug tooltip to show object names on mouse hover
  */
 function setupDebugTooltip() {
-    // Create tooltip element
-    const tooltip = document.createElement('div');
-    tooltip.id = 'debug-tooltip';
-    tooltip.style.cssText = `
-        position: fixed;
-        pointer-events: none;
-        background: rgba(0, 0, 0, 0.9);
-        color: white;
-        padding: 8px 12px;
-        border-radius: 4px;
-        font-family: monospace;
-        font-size: 11px;
-        z-index: 10000;
-        display: none;
-        max-width: 400px;
-        word-wrap: break-word;
-        white-space: pre-line;
-        line-height: 1.4;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    `;
-    document.body.appendChild(tooltip);
+    // Create tooltip element if it doesn't exist
+    let tooltip = document.getElementById('debug-tooltip');
+    if (!tooltip) {
+        tooltip = document.createElement('div');
+        tooltip.id = 'debug-tooltip';
+        tooltip.style.cssText = `
+            position: fixed;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 11px;
+            z-index: 10000;
+            display: none;
+            max-width: 400px;
+            word-wrap: break-word;
+            white-space: pre-line;
+            line-height: 1.4;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        `;
+        document.body.appendChild(tooltip);
+    }
 
     // Add mousemove listener to renderer canvas
-    renderer.domElement.addEventListener('mousemove', (event) => {
-        onMouseMove(event, tooltip);
+    // Don't clone/replace canvas as it breaks the 3D rendering
+    const canvas = renderer.domElement;
+    
+    // Add mousemove listener (will be added multiple times if called multiple times, but that's okay)
+    canvas.addEventListener('mousemove', (event) => {
+        if (state.showDebug) {
+            onMouseMove(event, tooltip);
+        } else {
+            tooltip.style.display = 'none';
+        }
     });
 
     // Hide tooltip when mouse leaves canvas
-    renderer.domElement.addEventListener('mouseleave', () => {
+    canvas.addEventListener('mouseleave', () => {
         tooltip.style.display = 'none';
     });
 }
@@ -1663,7 +1705,7 @@ function setupDebugTooltip() {
  * Handle mouse move for debug tooltip
  */
 function onMouseMove(event, tooltip) {
-    if (!renderer || !camera || !scene) return;
+    if (!renderer || !camera || !scene || !state.showDebug) return;
 
     // Calculate mouse position in normalized device coordinates
     const rect = renderer.domElement.getBoundingClientRect();
@@ -1926,6 +1968,14 @@ function renderSingleNoteGame() {
                 <div class="target-note">${state.targetNote}</div>
                 <div class="score">Score: ${state.score}</div>
             </div>
+            ${state.viewMode === '3d' ? `
+                <div class="debug-toggle-container">
+                    <label class="debug-toggle-label">
+                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                        <span>Debug Info</span>
+                    </label>
+                </div>
+            ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
@@ -1935,6 +1985,16 @@ function renderSingleNoteGame() {
         cleanupThreeJS();
         renderMenu();
     });
+
+    // Setup debug toggle (only for 3D view)
+    if (state.viewMode === '3d') {
+        const debugToggle = document.getElementById('debugToggle');
+        if (debugToggle) {
+            debugToggle.addEventListener('change', (e) => {
+                toggleDebugMode(e.target.checked);
+            });
+        }
+    }
 
     // Initialize based on view mode
     const container = document.getElementById('threeContainer');
@@ -1973,6 +2033,14 @@ function renderFindAllGame() {
                 </div>
                 <div class="score">Score: ${state.score}</div>
             </div>
+            ${state.viewMode === '3d' ? `
+                <div class="debug-toggle-container">
+                    <label class="debug-toggle-label">
+                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                        <span>Debug Info</span>
+                    </label>
+                </div>
+            ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
@@ -1982,6 +2050,16 @@ function renderFindAllGame() {
         cleanupThreeJS();
         renderMenu();
     });
+
+    // Setup debug toggle (only for 3D view)
+    if (state.viewMode === '3d') {
+        const debugToggle = document.getElementById('debugToggle');
+        if (debugToggle) {
+            debugToggle.addEventListener('change', (e) => {
+                toggleDebugMode(e.target.checked);
+            });
+        }
+    }
 
     // Initialize based on view mode
     const container = document.getElementById('threeContainer');
@@ -2285,6 +2363,14 @@ function renderTriadsGame() {
                 </div>
                 <div class="score">Score: ${state.score}</div>
             </div>
+            ${state.viewMode === '3d' ? `
+                <div class="debug-toggle-container">
+                    <label class="debug-toggle-label">
+                        <input type="checkbox" id="debugToggle" ${state.showDebug ? 'checked' : ''}>
+                        <span>Debug Info</span>
+                    </label>
+                </div>
+            ` : ''}
             <div class="fretboard-container" id="threeContainer"></div>
         </div>
     `;
@@ -2294,6 +2380,16 @@ function renderTriadsGame() {
         cleanupThreeJS();
         renderMenu();
     });
+
+    // Setup debug toggle (only for 3D view)
+    if (state.viewMode === '3d') {
+        const debugToggle = document.getElementById('debugToggle');
+        if (debugToggle) {
+            debugToggle.addEventListener('change', (e) => {
+                toggleDebugMode(e.target.checked);
+            });
+        }
+    }
 
     // Initialize based on view mode
     const container = document.getElementById('threeContainer');
