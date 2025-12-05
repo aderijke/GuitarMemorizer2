@@ -68,6 +68,132 @@ const state = {
 };
 
 /* ========================================
+   COOKIE UTILITIES
+   ======================================== */
+function setCookie(name, value, days = 365) {
+    const date = new Date();
+    date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+    const expires = `expires=${date.toUTCString()}`;
+    document.cookie = `${name}=${encodeURIComponent(JSON.stringify(value))};${expires};path=/`;
+}
+
+function getCookie(name) {
+    const nameEQ = `${name}=`;
+    const ca = document.cookie.split(';');
+    for (let i = 0; i < ca.length; i++) {
+        let c = ca[i];
+        while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+        if (c.indexOf(nameEQ) === 0) {
+            try {
+                return JSON.parse(decodeURIComponent(c.substring(nameEQ.length)));
+            } catch (e) {
+                return null;
+            }
+        }
+    }
+    return null;
+}
+
+function saveSettingsToCookies() {
+    // Save menu settings
+    setCookie('viewMode', state.viewMode);
+    setCookie('modelQuality', state.modelQuality);
+    setCookie('enableTimeLimit', state.enableTimeLimit);
+    setCookie('timeLimit', state.timeLimit);
+    setCookie('enableDisabledFrets', state.enableDisabledFrets);
+    setCookie('disabledFrets', state.disabledFrets);
+    
+    // Save triads settings
+    setCookie('triadSettings', state.triadSettings);
+    setCookie('showTriadRootNote', state.showTriadRootNote);
+    
+    // Save game screen settings
+    setCookie('showDebug', state.showDebug);
+    setCookie('rotationEnabled', state.rotationEnabled);
+    
+    // Save 2D rotation
+    setCookie('rotation', state.rotation);
+    
+    // Save camera position and target if they exist
+    if (camera && controls) {
+        setCookie('cameraPosition', {
+            x: camera.position.x,
+            y: camera.position.y,
+            z: camera.position.z
+        });
+        setCookie('cameraTarget', {
+            x: controls.target.x,
+            y: controls.target.y,
+            z: controls.target.z
+        });
+    }
+}
+
+function loadSettingsFromCookies() {
+    // Load menu settings
+    const viewMode = getCookie('viewMode');
+    if (viewMode !== null) state.viewMode = viewMode;
+    
+    const modelQuality = getCookie('modelQuality');
+    if (modelQuality !== null) state.modelQuality = modelQuality;
+    
+    const enableTimeLimit = getCookie('enableTimeLimit');
+    if (enableTimeLimit !== null) state.enableTimeLimit = enableTimeLimit;
+    
+    const timeLimit = getCookie('timeLimit');
+    if (timeLimit !== null) state.timeLimit = timeLimit;
+    
+    const enableDisabledFrets = getCookie('enableDisabledFrets');
+    if (enableDisabledFrets !== null) state.enableDisabledFrets = enableDisabledFrets;
+    
+    const disabledFrets = getCookie('disabledFrets');
+    if (disabledFrets !== null && Array.isArray(disabledFrets)) state.disabledFrets = disabledFrets;
+    
+    // Load triads settings
+    const triadSettings = getCookie('triadSettings');
+    if (triadSettings !== null) {
+        Object.assign(state.triadSettings, triadSettings);
+    }
+    
+    const showTriadRootNote = getCookie('showTriadRootNote');
+    if (showTriadRootNote !== null) state.showTriadRootNote = showTriadRootNote;
+    
+    // Load game screen settings
+    const showDebug = getCookie('showDebug');
+    if (showDebug !== null) state.showDebug = showDebug;
+    
+    const rotationEnabled = getCookie('rotationEnabled');
+    if (rotationEnabled !== null) state.rotationEnabled = rotationEnabled;
+    
+    // Load 2D rotation
+    const rotation = getCookie('rotation');
+    if (rotation !== null) {
+        state.rotation.x = rotation.x !== undefined ? rotation.x : 35;
+        state.rotation.y = rotation.y !== undefined ? rotation.y : 0;
+    }
+}
+
+function loadCameraFromCookies() {
+    if (!camera || !controls) return;
+    
+    const cameraPosition = getCookie('cameraPosition');
+    const cameraTarget = getCookie('cameraTarget');
+    
+    if (cameraPosition) {
+        camera.position.set(cameraPosition.x, cameraPosition.y, cameraPosition.z);
+    }
+    
+    if (cameraTarget) {
+        controls.target.set(cameraTarget.x, cameraTarget.y, cameraTarget.z);
+        camera.lookAt(controls.target);
+    }
+    
+    if (cameraPosition || cameraTarget) {
+        controls.update();
+    }
+}
+
+/* ========================================
    MUSIC THEORY CONSTANTS
    ======================================== */
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -358,12 +484,14 @@ function renderMenu() {
     const viewToggle = document.getElementById('viewModeToggle');
     viewToggle.addEventListener('change', (e) => {
         state.viewMode = e.target.checked ? '3d' : '2d';
+        saveSettingsToCookies();
     });
 
     // Setup model quality toggle
     const modelQualityToggle = document.getElementById('modelQualityToggle');
     modelQualityToggle.addEventListener('change', (e) => {
         state.modelQuality = e.target.checked ? 'high' : 'low';
+        saveSettingsToCookies();
     });
 
     // Setup time limit toggle
@@ -390,6 +518,7 @@ function renderMenu() {
                     if (timeLimitValue) timeLimitValue.textContent = '1s';
                 }
             }
+            saveSettingsToCookies();
         });
     }
 
@@ -403,6 +532,7 @@ function renderMenu() {
             const value = parseInt(e.target.value);
             state.timeLimit = value;
             timeLimitValue.textContent = `${value}s`;
+            saveSettingsToCookies();
         });
     }
 
@@ -421,6 +551,7 @@ function renderMenu() {
                 // If toggle is off, enable all frets (clear disabled frets)
                 state.disabledFrets = [];
             }
+            saveSettingsToCookies();
         });
     }
 
@@ -447,6 +578,7 @@ function renderMenu() {
         
         if (disabledFretStartValue) disabledFretStartValue.textContent = start;
         if (disabledFretEndValue) disabledFretEndValue.textContent = end;
+        saveSettingsToCookies();
     }
 
     if (disabledFretStart) {
@@ -593,7 +725,8 @@ function initThreeJS(container) {
             
             // Log camera state 500ms after user stops moving
             movementTimeout = setTimeout(() => {
-                // Camera movement stopped - logging removed
+                // Camera movement stopped - save to cookies
+                saveSettingsToCookies();
             }, 500);
             
             // Check if we're looking from behind (azimuth between 90 and 270 degrees)
@@ -671,6 +804,8 @@ function initThreeJS(container) {
                     controls.target.copy(endTarget);
                     camera.lookAt(controls.target);
                     controls.update();
+                    // Save camera position after reset
+                    saveSettingsToCookies();
                 }
             }
             
@@ -823,6 +958,9 @@ function loadGuitarModel() {
 
                     // Create fret zones after model is loaded
                     createFretZones();
+                    
+                    // Load camera position from cookies after model is loaded
+                    loadCameraFromCookies();
                     
                     // Highlight root note position if in triads mode and option is enabled
                     if (state.currentScreen === 'triads') {
@@ -2170,6 +2308,7 @@ function createMarkerDot(x, y, z) {
  */
 function toggleDebugMode(enabled) {
     state.showDebug = enabled;
+    saveSettingsToCookies();
     
     // Update hitbox visibility and opacity
     if (fretZones && fretZones.length > 0) {
@@ -2204,6 +2343,7 @@ function toggleDebugMode(enabled) {
 
 function toggleRotation(enabled) {
     state.rotationEnabled = enabled;
+    saveSettingsToCookies();
     
     // Enable/disable rotation in OrbitControls
     if (controls) {
@@ -3423,6 +3563,7 @@ function renderTriadsSettings() {
         const checkbox = document.getElementById(`setting-${type}`);
         checkbox.addEventListener('change', (e) => {
             state.triadSettings[type] = e.target.checked;
+            saveSettingsToCookies();
         });
     });
 
@@ -3431,6 +3572,7 @@ function renderTriadsSettings() {
     if (showRootNoteToggle) {
         showRootNoteToggle.addEventListener('change', (e) => {
             state.showTriadRootNote = e.target.checked;
+            saveSettingsToCookies();
         });
     }
 
@@ -3799,5 +3941,8 @@ function initCSSRotationControls() {
    INITIALIZATION
    ======================================== */
 document.addEventListener('DOMContentLoaded', () => {
+    // Load settings from cookies first
+    loadSettingsFromCookies();
     renderMenu();
 });
+
