@@ -2010,33 +2010,101 @@ function fallbackToCSS(container, gameMode) {
 /* ========================================
    OLD HTML RENDERING (kept for reference, can be removed later)
    ======================================== */
+/**
+ * Calculate fret spacing percentages based on logarithmic formula
+ * Formula from fret spacing mathematics: X_n = L × (1 - 1/r^n) where r = 2^(1/12)
+ * Returns array of percentages for each fret space (between frets)
+ */
+function calculateFretSpacingPercentages() {
+    const r = Math.pow(2, 1/12); // 12th root of 2 (approximately 1.059463)
+    const percentages = [];
+    
+    // Calculate position of nut (fret 0)
+    let prevPosition = 0; // Position of nut relative to scale length (0%)
+    
+    // For each fret from 1 to NUM_FRETS-1, calculate the width of the space before it
+    for (let fret = 1; fret < NUM_FRETS; fret++) {
+        // Position of this fret: X_n = 1 - 1/r^n (normalized to 0-1)
+        const currentPosition = 1 - (1 / Math.pow(r, fret));
+        
+        // Width of the space between previous fret and this fret
+        const spaceWidth = currentPosition - prevPosition;
+        percentages.push(spaceWidth);
+        
+        prevPosition = currentPosition;
+    }
+    
+    // Normalize percentages to sum to 1 (100%)
+    const total = percentages.reduce((sum, p) => sum + p, 0);
+    return percentages.map(p => (p / total) * 100);
+}
+
+/**
+ * Calculate cumulative positions for each fret (for absolute positioning of dots)
+ * Returns array of left positions (0-100%) for each fret space
+ */
+function calculateFretCumulativePositions() {
+    const r = Math.pow(2, 1/12); // 12th root of 2 (approximately 1.059463)
+    const positions = [];
+    
+    // Calculate cumulative position for each fret space
+    let cumulativePosition = 0;
+    
+    for (let fret = 1; fret < NUM_FRETS; fret++) {
+        // Position of this fret: X_n = 1 - 1/r^n (normalized to 0-1)
+        const currentPosition = 1 - (1 / Math.pow(r, fret));
+        
+        // Store the left edge position of this fret space (before normalization)
+        positions.push(cumulativePosition);
+        
+        // Move to next position
+        cumulativePosition = currentPosition;
+    }
+    
+    // Normalize to 0-100% range based on the total width
+    // The last position should account for the remaining space
+    const totalWidth = cumulativePosition;
+    if (totalWidth > 0) {
+        return positions.map(p => (p / totalWidth) * 100);
+    }
+    return positions;
+}
+
 function renderFretboard(highlightedPositions = []) {
+    // Calculate correct fret spacing percentages
+    const fretPercentages = calculateFretSpacingPercentages();
+    
     let fretboardHTML = '<div class="fretboard">';
 
-    // Add fret marker dots - place them in the same flex structure as fret numbers
+    fretboardHTML += '<div class="strings-container">';
+    
+    // Add fret marker dots - positioned absolutely within strings-container
     // Markers go in the middle of specific fret spaces (between frets)
     fretboardHTML += '<div class="fret-markers">';
     const markerFrets = [3, 5, 7, 9, 12, 15, 17, 19, 21];
 
-    // Create a flex container matching the fret layout
-    fretboardHTML += '<div class="fret-markers-container">';
+    // Calculate cumulative positions for absolute positioning
+    // Position dots in the center of each fret space
+    let cumulativePos = 0;
     for (let i = 1; i < NUM_FRETS; i++) {
+        const spaceWidth = fretPercentages[i - 1];
+        // Center position of this fret space (between previous fret and current fret)
+        const centerPos = cumulativePos + (spaceWidth / 2);
+        
         if (markerFrets.includes(i)) {
             if (i === 12) {
                 // Double dots for 12th fret
-                fretboardHTML += `<div class="fret-marker-space"><div class="fret-marker-dot" style="top: 35%"></div><div class="fret-marker-dot" style="top: 65%"></div></div>`;
+                fretboardHTML += `<div class="fret-marker-dot" style="left: ${centerPos}%; top: 25%; transform: translate(-50%, -50%)"></div>`;
+                fretboardHTML += `<div class="fret-marker-dot" style="left: ${centerPos}%; top: 75%; transform: translate(-50%, -50%)"></div>`;
             } else {
-                fretboardHTML += `<div class="fret-marker-space"><div class="fret-marker-dot"></div></div>`;
+                // Single dot centered vertically
+                fretboardHTML += `<div class="fret-marker-dot" style="left: ${centerPos}%"></div>`;
             }
-        } else {
-            // Empty space for frets without markers
-            fretboardHTML += '<div class="fret-marker-space"></div>';
         }
+        
+        cumulativePos += spaceWidth;
     }
     fretboardHTML += '</div>';
-    fretboardHTML += '</div>';
-
-    fretboardHTML += '<div class="strings-container">';
 
     // Render each string
     for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
@@ -2052,11 +2120,13 @@ function renderFretboard(highlightedPositions = []) {
             const isHighlighted = highlightedPositions.some(
                 pos => pos.string === stringIndex && pos.fret === fretIndex
             );
+            const percentage = fretPercentages[fretIndex - 1];
 
             fretboardHTML += `
                 <div class="fret ${isHighlighted ? 'highlighted' : ''}" 
                      data-string="${stringIndex}" 
-                     data-fret="${fretIndex}">
+                     data-fret="${fretIndex}"
+                     style="flex-basis: ${percentage}%">
                     ${isHighlighted ? `<div class="note-marker found">${note}</div>` : ''}
                 </div>
             `;
@@ -2070,7 +2140,8 @@ function renderFretboard(highlightedPositions = []) {
     // Add fret numbers
     fretboardHTML += '<div class="fret-numbers">';
     for (let i = 1; i < NUM_FRETS; i++) {
-        fretboardHTML += `<div class="fret-number">${i}</div>`;
+        const percentage = fretPercentages[i - 1];
+        fretboardHTML += `<div class="fret-number" style="flex-basis: ${percentage}%">${i}</div>`;
     }
     fretboardHTML += '</div>';
 
