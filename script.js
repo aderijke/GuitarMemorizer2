@@ -64,7 +64,9 @@ const state = {
     // Enable disabled frets mode: if true, allow disabling frets with from/to sliders
     enableDisabledFrets: false,
     // Timer started: track if timer has been started (starts on first click)
-    timerStarted: false
+    timerStarted: false,
+    // First question: track if this is the first question (timer waits for click)
+    isFirstQuestion: true
 };
 
 /* ========================================
@@ -2785,7 +2787,12 @@ function clearTimer() {
         clearInterval(gameTimer);
         gameTimer = null;
     }
-    state.timeRemaining = 0;
+    // Reset timer to original time limit if enabled, otherwise set to 0
+    if (state.enableTimeLimit && state.timeLimit > 0) {
+        state.timeRemaining = state.timeLimit;
+    } else {
+        state.timeRemaining = 0;
+    }
     updateTimerDisplay();
 }
 
@@ -2854,18 +2861,17 @@ function handleTimeOut() {
     
     // Reset timer started flag for next question
     state.timerStarted = false;
+    // After timeout, timer should auto-start (not first question anymore)
+    state.isFirstQuestion = false;
     
     // Move to next task based on current game mode
     if (state.currentScreen === 'singleNote') {
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
-            // Timer will start again on first click
+            // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
-                const timerElement = document.querySelector('.timer-display');
-                if (timerElement) {
-                    timerElement.textContent = `Time: ${state.timeLimit}s`;
-                }
+                startTimer();
             }
         }, 1500);
     } else if (state.currentScreen === 'findAll') {
@@ -2883,12 +2889,9 @@ function handleTimeOut() {
             
             document.querySelector('.target-note').textContent = state.targetNote;
             document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
-            // Timer will start again on first click
+            // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
-                const timerElement = document.querySelector('.timer-display');
-                if (timerElement) {
-                    timerElement.textContent = `Time: ${state.timeLimit}s`;
-                }
+                startTimer();
             }
         }, 1500);
     } else if (state.currentScreen === 'triads') {
@@ -2916,12 +2919,9 @@ function handleTimeOut() {
             highlightRootNotePosition();
             
             renderTriadsGameUpdate();
-            // Timer will start again on first click
+            // Auto-start timer (not first question after timeout)
             if (state.enableTimeLimit && state.timeLimit > 0) {
-                const timerElement = document.querySelector('.timer-display');
-                if (timerElement) {
-                    timerElement.textContent = `Time: ${state.timeLimit}s`;
-                }
+                startTimer();
             }
         }, 1500);
     }
@@ -3175,6 +3175,7 @@ function startSingleNoteGame() {
     state.targetNote = getRandomNote();
     state.score = 0;
     state.errors = 0;
+    state.isFirstQuestion = true; // Reset to first question for new game
     renderSingleNoteGame();
 }
 
@@ -3185,6 +3186,7 @@ function startFindAllGame() {
     state.foundPositions = [];
     state.score = 0;
     state.errors = 0;
+    state.isFirstQuestion = true; // Reset to first question for new game
     renderFindAllGame();
 }
 
@@ -3227,15 +3229,20 @@ function handleSingleNoteClick(stringIndex, fretIndex, note) {
 
         // Clear timer and auto-advance to next note
         clearTimer();
-        state.timerStarted = false; // Reset timer started flag for next question
+        state.timerStarted = false;
+        state.isFirstQuestion = false; // After first question, timer will auto-start
         setTimeout(() => {
             state.targetNote = getRandomNote();
             document.querySelector('.target-note').textContent = state.targetNote;
-            // Timer will start again on first click
+            // Auto-start timer if not first question, otherwise wait for click
             if (state.enableTimeLimit && state.timeLimit > 0) {
-                const timerElement = document.querySelector('.timer-display');
-                if (timerElement) {
-                    timerElement.textContent = `Time: ${state.timeLimit}s`;
+                if (!state.isFirstQuestion) {
+                    startTimer();
+                } else {
+                    const timerElement = document.querySelector('.timer-display');
+                    if (timerElement) {
+                        timerElement.textContent = `Time: ${state.timeLimit}s`;
+                    }
                 }
             }
         }, 1500);
@@ -3308,7 +3315,8 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
             // Clear timer and auto-advance to next note
             clearTimer();
-            state.timerStarted = false; // Reset timer started flag for next question
+            state.timerStarted = false;
+            state.isFirstQuestion = false; // After first question, timer will auto-start
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
@@ -3323,11 +3331,15 @@ function handleFindAllClick(stringIndex, fretIndex, note) {
 
                 document.querySelector('.target-note').textContent = state.targetNote;
                 document.querySelector('.progress-info').textContent = `Found: 0 / ${state.allPositions.length}`;
-                // Timer will start again on first click
+                // Auto-start timer if not first question, otherwise wait for click
                 if (state.enableTimeLimit && state.timeLimit > 0) {
-                    const timerElement = document.querySelector('.timer-display');
-                    if (timerElement) {
-                        timerElement.textContent = `Time: ${state.timeLimit}s`;
+                    if (!state.isFirstQuestion) {
+                        startTimer();
+                    } else {
+                        const timerElement = document.querySelector('.timer-display');
+                        if (timerElement) {
+                            timerElement.textContent = `Time: ${state.timeLimit}s`;
+                        }
                     }
                 }
             }, 2000);
@@ -3401,7 +3413,8 @@ function handleTriadClick(stringIndex, fretIndex, note) {
 
                 // Clear timer and auto-advance to next triad
                 clearTimer();
-                state.timerStarted = false; // Reset timer started flag for next question
+                state.timerStarted = false;
+                state.isFirstQuestion = false; // After first question, timer will auto-start
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
                     state.clickedTriadNotes = [];
@@ -3427,11 +3440,15 @@ function handleTriadClick(stringIndex, fretIndex, note) {
 
                     // Update UI (we need to re-render the triad display)
                     renderTriadsGameUpdate();
-                    // Timer will start again on first click
+                    // Auto-start timer if not first question, otherwise wait for click
                     if (state.enableTimeLimit && state.timeLimit > 0) {
-                        const timerElement = document.querySelector('.timer-display');
-                        if (timerElement) {
-                            timerElement.textContent = `Time: ${state.timeLimit}s`;
+                        if (!state.isFirstQuestion) {
+                            startTimer();
+                        } else {
+                            const timerElement = document.querySelector('.timer-display');
+                            if (timerElement) {
+                                timerElement.textContent = `Time: ${state.timeLimit}s`;
+                            }
                         }
                     }
                 }, 2000);
@@ -3485,6 +3502,7 @@ function startTriadsGameFromSettings() {
     state.clickedTriadPositions = [];
     state.score = 0;
     state.errors = 0;
+    state.isFirstQuestion = true; // Reset to first question for new game
     
     // Set root note position if option is enabled
     state.triadRootNotePosition = selectRandomRootNotePosition(state.targetTriad?.root);
@@ -3778,9 +3796,18 @@ function handleSingleNoteDOMClick(event) {
         state.score += 1;
         updateScoreDisplay();
 
+        // Clear timer and reset for next question
+        clearTimer();
+        state.timerStarted = false;
+        state.isFirstQuestion = false; // After first question, timer will auto-start
+
         setTimeout(() => {
             state.targetNote = getRandomNote();
             renderSingleNoteGame();
+            // Auto-start timer if not first question
+            if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
+                startTimer();
+            }
         }, 1500);
     } else {
         state.errors += 1;
@@ -3824,11 +3851,21 @@ function handleFindAllDOMClick(event) {
             renderFindAllGame();
             showFeedback('success', `Awesome! You found all ${state.targetNote}'s!`);
             state.score += 10;
+            
+            // Clear timer and reset for next question
+            clearTimer();
+            state.timerStarted = false;
+            state.isFirstQuestion = false; // After first question, timer will auto-start
+            
             setTimeout(() => {
                 state.targetNote = getRandomNote();
                 state.allPositions = getAllPositions(state.targetNote);
                 state.foundPositions = [];
                 renderFindAllGame();
+                // Auto-start timer if not first question
+                if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
+                    startTimer();
+                }
             }, 2000);
         }
     } else {
@@ -3875,6 +3912,12 @@ function handleTriadDOMClick(event) {
                 state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
                 showFeedback('success', 'Perfect! All notes found!');
                 state.score += 1;
+                
+                // Clear timer and reset for next question
+                clearTimer();
+                state.timerStarted = false;
+                state.isFirstQuestion = false; // After first question, timer will auto-start
+                
                 renderTriadsGame();
                 setTimeout(() => {
                     state.targetTriad = getRandomTriad();
@@ -3901,6 +3944,10 @@ function handleTriadDOMClick(event) {
                     }
                     
                     renderTriadsGame();
+                    // Auto-start timer if not first question
+                    if (state.enableTimeLimit && state.timeLimit > 0 && !state.isFirstQuestion) {
+                        startTimer();
+                    }
                 }, 2000);
             } else {
                 state.clickedTriadPositions.push({ string: stringIndex, fret: fretIndex });
