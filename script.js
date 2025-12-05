@@ -287,6 +287,9 @@ function initThreeJS(container) {
         raycaster = new THREE.Raycaster();
         mouse = new THREE.Vector2();
 
+        // Setup debug tooltip for mouse hover
+        setupDebugTooltip();
+
         // Handle window resize
         window.addEventListener('resize', onWindowResize);
 
@@ -334,6 +337,16 @@ function loadGuitarModel() {
                 (object) => {
                     guitarModel = object;
 
+                    // Debug: Log all mesh names to find frets
+                    console.log("Model loaded. Meshes:");
+                    guitarModel.traverse((child) => {
+                        if (child.isMesh) {
+                            console.log(`- ${child.name}`);
+                        }
+                    });
+
+                    // Calculate neck region immediately
+                    const neckRegion = findNeckRegion();
                     // Load custom texture
                     const textureLoader = new THREE.TextureLoader();
                     const texture = textureLoader.load('Gibson 335/Texturas/Tex_Caja_2.jpg');
@@ -390,34 +403,87 @@ function loadGuitarModel() {
 function findNeckRegion() {
     if (!guitarModel) return null;
 
-    // Calculate overall bounding box
+    // Find Nut (Cejilla), Bridge (Puente), and Neck (Mastil) to calculate dimensions
+    let nutMesh = null;
+    let bridgeMesh = null;
+    let neckMesh = null;
+
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.name) {
+            const name = child.name.toLowerCase();
+            if (name.includes('cejilla')) {
+                nutMesh = child;
+            } else if (name.includes('puente')) {
+                bridgeMesh = child;
+            } else if (name.includes('mastil')) {
+                neckMesh = child;
+            }
+        }
+    });
+
+    // Calculate overall bounding box for fallbacks
     const overallBox = new THREE.Box3().setFromObject(guitarModel);
     const overallSize = overallBox.getSize(new THREE.Vector3());
     const overallCenter = overallBox.getCenter(new THREE.Vector3());
     const overallMin = overallBox.min;
-    const overallMax = overallBox.max;
 
-    // For a guitar model rotated 90 degrees on Y axis:
-    // - X axis: length (headstock to body)
-    // - Y axis: height (top to bottom)
-    // - Z axis: width (side to side)
-    
-    // The neck typically:
-    // - Starts near the headstock (left/most negative X) at the nut
-    // - Extends about 60-70% of the model length
-    // - Is narrow in Z (about 5-10% of model width)
-    // - Is centered in Z
-    // - Is at a specific Y level (around the middle, slightly above center)
-    
-    // More conservative estimates based on typical guitar proportions
-    const neckLength = overallSize.x * 0.65; // Neck is about 65% of model length
-    const neckWidth = overallSize.z * 0.12; // Neck is narrow in Z (about 12% of width)
-    
-    // Neck starts from the nut position (where fret 0 would be)
-    // The nut is typically at the junction of headstock and neck
-    // Start a bit further in from the left edge to account for headstock
-    const nutX = overallMin.x + overallSize.x * 0.15; // Nut position (fret 0)
-    const neckStartX = nutX; // First fret starts just after the nut
+    let nutX, scaleLength, neckLength, neckWidth;
+
+    if (nutMesh && bridgeMesh) {
+        // Get exact positions from objects
+        nutMesh.updateMatrixWorld(true);
+        bridgeMesh.updateMatrixWorld(true);
+
+        const nutBox = new THREE.Box3().setFromObject(nutMesh);
+        const bridgeBox = new THREE.Box3().setFromObject(bridgeMesh);
+
+        // Nut is usually at the start of the scale (closest to headstock)
+        // We want the edge of the nut that touches the fretboard
+        nutX = nutBox.max.x;
+
+        // Bridge saddle is where the string ends vibrating
+        const bridgeX = bridgeBox.getCenter(new THREE.Vector3()).x;
+
+        // Calculate scale length
+        scaleLength = Math.abs(bridgeX - nutX);
+
+        console.log(`Found Nut at X=${nutX.toFixed(3)} and Bridge at X=${bridgeX.toFixed(3)}`);
+        console.log(`Calculated Scale Length: ${scaleLength.toFixed(3)}`);
+    } else {
+        console.warn('Could not find Nut or Bridge objects, using estimation');
+        // Fallback estimation
+        nutX = overallMin.x + overallSize.x * 0.15;
+        scaleLength = overallSize.x * 0.65;
+    }
+
+    // Calculate neck length - try to find from neck mesh, otherwise estimate
+    if (neckMesh) {
+        neckMesh.updateMatrixWorld(true);
+        const neckBox = new THREE.Box3().setFromObject(neckMesh);
+        const neckSize = neckBox.getSize(new THREE.Vector3());
+        neckLength = neckSize.x; // Length along X axis
+        neckWidth = neckSize.z; // Width along Z axis
+        console.log(`Found Neck mesh, length: ${neckLength.toFixed(3)}, width: ${neckWidth.toFixed(3)}`);
+    } else {
+        // Estimate: neck typically extends to about 12-14 frets, roughly 60-70% of scale length
+        neckLength = scaleLength * 0.65;
+        console.warn('Could not find Neck mesh, using estimated length');
+    }
+
+    // Calculate neck width if not found from mesh
+    if (!neckWidth) {
+        if (nutMesh) {
+            const nutBox = new THREE.Box3().setFromObject(nutMesh);
+            const nutSize = nutBox.getSize(new THREE.Vector3());
+            // Neck width is typically slightly wider than nut at the nut, tapers down
+            neckWidth = nutSize.z * 1.1; // Slightly wider than nut
+        } else {
+            // Fallback: estimate from overall size
+            neckWidth = overallSize.z * 0.15;
+        }
+    }
+
+    const neckStartX = nutX;
     const neckCenterZ = overallCenter.z; // Centered in Z
     const neckY = overallCenter.y - overallSize.y * 0.1; // Slightly below center (fretboard is on top of neck)
 
@@ -432,12 +498,537 @@ function findNeckRegion() {
     };
 }
 
-function findFretPositionsUsingRaycasting(neckRegion) {
-    if (!neckRegion || !guitarModel) return null;
+/**
+ * Group fret candidates that are close together (same fret detected multiple times)
+ * Uses a larger tolerance to account for fret thickness
+ */
+function groupFretCandidates(candidates, tolerance = 0.015) {
+    if (candidates.length === 0) return [];
+    
+    // Sort by X position
+    candidates.sort((a, b) => a.x - b.x);
+    
+    const groups = [];
+    
+    for (const candidate of candidates) {
+        let addedToGroup = false;
+        
+        // Try to add to existing group
+        for (const group of groups) {
+            // Check if candidate is within tolerance of the group center
+            // This is more efficient and works better for grouping
+            const distance = Math.abs(candidate.x - group.x);
+            
+            if (distance < tolerance) {
+                // Add to this group
+                group.candidates.push(candidate);
+                // Update group center (weighted average by vertex count if available)
+                const totalWeight = group.candidates.reduce((sum, c) => sum + (c.vertexCount || 1), 0);
+                group.x = group.candidates.reduce((sum, c) => sum + c.x * (c.vertexCount || 1), 0) / totalWeight;
+                group.y = Math.max(...group.candidates.map(c => c.y));
+                group.z = group.candidates.reduce((sum, c) => sum + c.z, 0) / group.candidates.length;
+                addedToGroup = true;
+                break;
+            }
+        }
+        
+        // Create new group if not added to existing
+        if (!addedToGroup) {
+            groups.push({
+                x: candidate.x,
+                y: candidate.y,
+                z: candidate.z,
+                candidates: [candidate]
+            });
+        }
+    }
+    
+    // Convert groups to simple fret objects
+    return groups.map(group => ({
+        x: group.x,
+        y: group.y,
+        z: group.z,
+        candidateCount: group.candidates.length
+    }));
+}
+
+/**
+ * Extract fret positions from the fretboard geometry
+ * Uses raycasting to find frets by detecting height changes on the fretboard
+ */
+function extractFretPositionsFromGeometry(neckRegion) {
+    if (!guitarModel) return null;
+
+    // Find the circulo object that contains all frets
+    // Specifically look for "Círculo.009_Círculo.060" (exact name)
+    let fretContainerObject = null;
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.name) {
+            // Try exact match first
+            if (child.name === 'Círculo.009_Círculo.060') {
+                fretContainerObject = child;
+            } else {
+                // Fallback: case-insensitive match for variations
+                const name = child.name.toLowerCase();
+                const normalizedTarget = 'círculo.009_círculo.060';
+                if (name === normalizedTarget || 
+                    (name.includes('circulo.009') && name.includes('circulo.060'))) {
+                    fretContainerObject = child;
+                }
+            }
+        }
+    });
+
+    if (fretContainerObject) {
+        console.log(`Found fret container object: ${fretContainerObject.name}`);
+        fretContainerObject.updateMatrixWorld(true);
+        
+        // Get bounding box of the fret container
+        const fretBox = new THREE.Box3().setFromObject(fretContainerObject);
+        const nutX = neckRegion.nutX || neckRegion.startX;
+        const neckEndX = neckRegion.startX + neckRegion.length;
+        
+        // Method 1: Analyze by color/material differences - frets might have different colors
+        const geometry = fretContainerObject.geometry;
+        const material = fretContainerObject.material;
+        
+        // Check if geometry has vertex colors
+        if (geometry && geometry.attributes.color) {
+            console.log('Found vertex colors in geometry, analyzing color differences...');
+            const colors = geometry.attributes.color;
+            const positions = geometry.attributes.position;
+            const worldMatrix = fretContainerObject.matrixWorld;
+            const vertex = new THREE.Vector3();
+            const color = new THREE.Color();
+            
+            // Group vertices by X position and check their colors
+            const xColorGroups = new Map();
+            
+            for (let i = 0; i < positions.count; i++) {
+                vertex.fromBufferAttribute(positions, i);
+                vertex.applyMatrix4(worldMatrix);
+                
+                if (vertex.x > nutX && vertex.x < neckEndX) {
+                    color.fromBufferAttribute(colors, i);
+                    const roundedX = Math.round(vertex.x * 2000) / 2000; // 0.0005 precision
+                    
+                    if (!xColorGroups.has(roundedX)) {
+                        xColorGroups.set(roundedX, {
+                            x: roundedX,
+                            colors: [],
+                            vertices: []
+                        });
+                    }
+                    
+                    xColorGroups.get(roundedX).colors.push({
+                        r: color.r,
+                        g: color.g,
+                        b: color.b
+                    });
+                    xColorGroups.get(roundedX).vertices.push(vertex);
+                }
+            }
+            
+            // Calculate average brightness across all positions to find baseline
+            let totalBrightness = 0;
+            let totalCount = 0;
+            xColorGroups.forEach((group) => {
+                group.colors.forEach(c => {
+                    totalBrightness += (c.r + c.g + c.b) / 3;
+                    totalCount++;
+                });
+            });
+            const avgBrightness = totalBrightness / totalCount;
+            
+            console.log(`Analyzing ${xColorGroups.size} X positions, average brightness: ${avgBrightness.toFixed(3)}`);
+            
+            // Find X positions where colors are significantly different (likely frets)
+            // Frets might be darker (no color/material) or have different colors
+            const fretCandidates = [];
+            xColorGroups.forEach((group, x) => {
+                if (group.colors.length > 3) {
+                    // Calculate average color and brightness for this X position
+                    const avgR = group.colors.reduce((sum, c) => sum + c.r, 0) / group.colors.length;
+                    const avgG = group.colors.reduce((sum, c) => sum + c.g, 0) / group.colors.length;
+                    const avgB = group.colors.reduce((sum, c) => sum + c.b, 0) / group.colors.length;
+                    const groupBrightness = (avgR + avgG + avgB) / 3;
+                    
+                    // Check brightness difference from average (frets might be darker/lighter)
+                    const brightnessDiff = Math.abs(groupBrightness - avgBrightness);
+                    
+                    // Check color variance within this group
+                    const variance = group.colors.reduce((sum, c) => {
+                        const cBrightness = (c.r + c.g + c.b) / 3;
+                        return sum + Math.abs(cBrightness - groupBrightness);
+                    }, 0) / group.colors.length;
+                    
+                    // Frets might be:
+                    // 1. Significantly darker (no color/material) - brightnessDiff > threshold
+                    // 2. Significantly lighter (different material) - brightnessDiff > threshold
+                    // 3. Have high color variance (mixed colors) - variance > threshold
+                    const isDark = groupBrightness < avgBrightness - 0.1;
+                    const isLight = groupBrightness > avgBrightness + 0.1;
+                    const hasHighVariance = variance > 0.08;
+                    
+                    if (brightnessDiff > 0.12 || (hasHighVariance && brightnessDiff > 0.05)) {
+                        const avgY = group.vertices.reduce((sum, v) => sum + v.y, 0) / group.vertices.length;
+                        const avgZ = group.vertices.reduce((sum, v) => sum + v.z, 0) / group.vertices.length;
+                        
+                        fretCandidates.push({
+                            x: x,
+                            y: avgY,
+                            z: avgZ,
+                            brightness: groupBrightness,
+                            brightnessDiff: brightnessDiff,
+                            colorVariance: variance,
+                            isDark: isDark,
+                            isLight: isLight,
+                            vertexCount: group.vertices.length
+                        });
+                    }
+                }
+            });
+            
+            if (fretCandidates.length > 0) {
+                console.log(`Found ${fretCandidates.length} fret candidates using vertex colors`);
+                
+                // Group nearby candidates using improved grouping function
+                // Use larger tolerance (1.5cm) to account for fret thickness
+                const groupedFrets = groupFretCandidates(fretCandidates, 0.015);
+                
+                groupedFrets.sort((a, b) => a.x - b.x);
+                const validFrets = groupedFrets.filter(f => f.x > nutX && f.x < neckEndX);
+                
+                console.log(`Found ${validFrets.length} frets using vertex color analysis:`);
+                validFrets.forEach((fret, i) => {
+                    const type = fret.isDark ? 'dark' : (fret.isLight ? 'light' : 'varied');
+                    console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, brightness=${fret.brightness.toFixed(3)}, diff=${fret.brightnessDiff.toFixed(3)}, type=${type}`);
+                });
+                
+                // Return results from color detection (will be supplemented with calculated if needed)
+                if (validFrets.length > 0) {
+                    console.log(`Using ${validFrets.length} frets from vertex color analysis`);
+                    return validFrets;
+                }
+            } else {
+                console.log('No frets found using vertex color analysis');
+            }
+        } else {
+            console.log('No vertex colors found in geometry - color/material detection requires vertex colors');
+        }
+        
+        // Color/material detection did not find frets, try geometry analysis
+        console.log('Color/material detection did not find frets, trying geometry analysis...');
+        
+        // Method 2: Direct geometry analysis - analyze vertices and edges to find fret positions
+        if (geometry && geometry.attributes.position) {
+            const positions = geometry.attributes.position;
+            const worldMatrix = fretContainerObject.matrixWorld;
+            const vertex = new THREE.Vector3();
+            
+            // Collect all X positions from vertices with their Y and Z
+            const vertexData = [];
+            for (let i = 0; i < positions.count; i++) {
+                vertex.fromBufferAttribute(positions, i);
+                vertex.applyMatrix4(worldMatrix);
+                
+                // Only consider vertices in the neck region
+                if (vertex.x > nutX && vertex.x < neckEndX) {
+                    vertexData.push({
+                        x: vertex.x,
+                        y: vertex.y,
+                        z: vertex.z
+                    });
+                }
+            }
+            
+            console.log(`Analyzing ${vertexData.length} vertices in neck region`);
+            
+            // Try multiple rounding precisions to find frets
+            const precisions = [100, 200, 500, 1000, 2000]; // Different levels of precision
+            let bestFrets = [];
+            
+            for (let precision of precisions) {
+                // Group vertices by X position (frets are vertical, so many vertices share same X)
+                const xGroups = new Map();
+                
+                vertexData.forEach(v => {
+                    const roundedX = Math.round(v.x * precision) / precision;
+                    if (!xGroups.has(roundedX)) {
+                        xGroups.set(roundedX, []);
+                    }
+                    xGroups.get(roundedX).push(v);
+                });
+                
+                // Find X positions with many vertices (these are likely frets)
+                // Frets are vertical lines, so they have many vertices at the same X
+                const fretCandidates = [];
+                const minVertexCount = 3; // Lower threshold to catch more frets
+                
+                xGroups.forEach((vertices, x) => {
+                    if (vertices.length >= minVertexCount) {
+                        // Calculate average Y and Z for this X position
+                        const avgY = vertices.reduce((sum, v) => sum + v.y, 0) / vertices.length;
+                        const avgZ = vertices.reduce((sum, v) => sum + v.z, 0) / vertices.length;
+                        const maxY = Math.max(...vertices.map(v => v.y));
+                        
+                        fretCandidates.push({
+                            x: x,
+                            y: maxY, // Use max Y (top of fret)
+                            z: avgZ,
+                            vertexCount: vertices.length,
+                            avgY: avgY
+                        });
+                    }
+                });
+                
+                // Group nearby candidates using improved grouping function
+                // Use larger tolerance (1.5cm) to account for fret thickness
+                const groupedFrets = groupFretCandidates(fretCandidates, 0.015);
+                
+                // Sort final frets
+                groupedFrets.sort((a, b) => a.x - b.x);
+                
+                const validFrets = groupedFrets.map(f => ({
+                    x: f.x,
+                    y: f.y,
+                    z: f.z,
+                    vertexCount: f.candidateCount || 1
+                }));
+                
+                // Keep the result with the most frets
+                if (validFrets.length > bestFrets.length) {
+                    bestFrets = validFrets;
+                    console.log(`Found ${validFrets.length} frets using precision ${precision}:`);
+                    validFrets.forEach((fret, i) => {
+                        console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, vertices=${fret.vertexCount}`);
+                    });
+                }
+            }
+            
+            if (bestFrets.length >= NUM_FRETS - 1) {
+                console.log(`Extracted ${bestFrets.length} fret positions from geometry analysis`);
+                return bestFrets.slice(0, NUM_FRETS - 1);
+            } else if (bestFrets.length >= 8) {
+                console.log(`Found ${bestFrets.length} frets using geometry analysis`);
+                return bestFrets;
+            } else {
+                console.log(`Geometry analysis found only ${bestFrets.length} frets, trying edge analysis...`);
+            }
+        }
+        
+        // Method 3: Analyze faces/edges to find vertical edges (frets)
+        if (fretContainerObject.geometry && fretContainerObject.geometry.index) {
+            const geometry2 = fretContainerObject.geometry;
+            console.log('Trying face/edge analysis method...');
+            const positions = geometry2.attributes.position;
+            const indices = geometry2.index;
+            const worldMatrix = fretContainerObject.matrixWorld;
+            const vertex = new THREE.Vector3();
+            
+            // Collect all X positions from edges (where faces meet)
+            const edgeXPositions = new Set();
+            
+            // Analyze each face to find vertical edges
+            for (let i = 0; i < indices.count; i += 3) {
+                const i0 = indices.getX(i);
+                const i1 = indices.getX(i + 1);
+                const i2 = indices.getX(i + 2);
+                
+                const vertices = [
+                    vertex.fromBufferAttribute(positions, i0).applyMatrix4(worldMatrix),
+                    vertex.fromBufferAttribute(positions, i1).applyMatrix4(worldMatrix),
+                    vertex.fromBufferAttribute(positions, i2).applyMatrix4(worldMatrix)
+                ];
+                
+                // Check each edge of the triangle
+                for (let j = 0; j < 3; j++) {
+                    const v1 = vertices[j];
+                    const v2 = vertices[(j + 1) % 3];
+                    
+                    // If X is similar but Y or Z differs significantly, it's a vertical edge (fret)
+                    const xDiff = Math.abs(v1.x - v2.x);
+                    const yDiff = Math.abs(v1.y - v2.y);
+                    const zDiff = Math.abs(v1.z - v2.z);
+                    
+                    if (xDiff < 0.001 && (yDiff > 0.01 || zDiff > 0.01)) {
+                        // Vertical edge - this is likely part of a fret
+                        const avgX = (v1.x + v2.x) / 2;
+                        if (avgX > nutX && avgX < neckEndX) {
+                            edgeXPositions.add(Math.round(avgX * 1000) / 1000);
+                        }
+                    }
+                }
+            }
+            
+            // Convert to array and group using improved grouping
+            const edgeXArray = Array.from(edgeXPositions).sort((a, b) => a - b);
+            const edgeCandidates = edgeXArray.map(x => ({
+                x: x,
+                y: neckRegion.y,
+                z: neckRegion.centerZ,
+                vertexCount: 1
+            }));
+            
+            // Group nearby edges using improved grouping function
+            // Use larger tolerance (1.5cm) to account for fret thickness
+            const groupedFrets = groupFretCandidates(edgeCandidates, 0.015);
+            
+            // Filter to only include groups with multiple edges (more reliable)
+            const fretCandidates = groupedFrets
+                .filter(f => f.candidateCount >= 2)
+                .map(f => ({
+                    x: f.x,
+                    y: f.y,
+                    z: f.z
+                }))
+                .sort((a, b) => a.x - b.x);
+            
+            console.log(`Found ${fretCandidates.length} frets using edge analysis`);
+            
+            if (fretCandidates.length > bestFrets.length) {
+                bestFrets = fretCandidates;
+                console.log('Edge analysis found more frets, using those:');
+                fretCandidates.forEach((fret, i) => {
+                    console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}`);
+                });
+            }
+        }
+        
+        // Method 4: Use raycasting to find frets by detecting height changes
+        console.log('Trying raycasting method to find frets...');
+        // Scan along the X-axis at multiple Z positions to find where frets are located
+        const raycaster = new THREE.Raycaster();
+        const sampleCount = 1000; // Very high resolution scan
+        const scanStartX = Math.max(nutX, fretBox.min.x);
+        const scanEndX = Math.min(neckEndX, fretBox.max.x);
+        const scanLength = scanEndX - scanStartX;
+        const stepSize = scanLength / sampleCount;
+        
+        // Scan at multiple Z positions to catch all frets
+        const zPositions = [
+            neckRegion.centerZ,
+            neckRegion.centerZ - neckRegion.width * 0.3,
+            neckRegion.centerZ + neckRegion.width * 0.3
+        ];
+        
+        const heightSamples = [];
+        const scanY = neckRegion.y + 0.5; // Start ray above the fretboard
+        
+        // Sample heights along the X-axis at multiple Z positions
+        for (let zPos of zPositions) {
+            for (let i = 0; i <= sampleCount; i++) {
+                const sampleX = scanStartX + (i * stepSize);
+                const rayOrigin = new THREE.Vector3(sampleX, scanY, zPos);
+                const rayDirection = new THREE.Vector3(0, -1, 0);
+                
+                raycaster.set(rayOrigin, rayDirection);
+                const intersects = raycaster.intersectObject(fretContainerObject, false);
+                
+                if (intersects.length > 0) {
+                    // Find the highest intersection (top of fret)
+                    const highestIntersect = intersects.reduce((prev, curr) => 
+                        curr.point.y > prev.point.y ? curr : prev
+                    );
+                    heightSamples.push({
+                        x: sampleX,
+                        y: highestIntersect.point.y,
+                        z: highestIntersect.point.z
+                    });
+                }
+            }
+        }
+        
+        // Group samples by X position to find average height at each X
+        const xGroups = new Map();
+        heightSamples.forEach(sample => {
+            const roundedX = Math.round(sample.x * 1000) / 1000; // Round to 0.001
+            if (!xGroups.has(roundedX)) {
+                xGroups.set(roundedX, []);
+            }
+            xGroups.get(roundedX).push(sample.y);
+        });
+        
+        // Create averaged height samples
+        const averagedSamples = [];
+        xGroups.forEach((yValues, x) => {
+            const avgY = yValues.reduce((sum, y) => sum + y, 0) / yValues.length;
+            const maxY = Math.max(...yValues);
+            averagedSamples.push({
+                x: x,
+                y: avgY,
+                maxY: maxY
+            });
+        });
+        
+        // Sort by X
+        averagedSamples.sort((a, b) => a.x - b.x);
+        
+        // Find frets by detecting local maxima in height
+        // Frets are vertical lines that are higher than the surrounding area
+        const fretCandidates = [];
+        const heightThreshold = 0.0005; // Lower threshold to catch more frets
+        
+        for (let i = 2; i < averagedSamples.length - 2; i++) {
+            const prev2Y = averagedSamples[i - 2]?.y || averagedSamples[i - 1]?.y || 0;
+            const prevY = averagedSamples[i - 1]?.y || 0;
+            const currY = averagedSamples[i].y;
+            const nextY = averagedSamples[i + 1]?.y || 0;
+            const next2Y = averagedSamples[i + 2]?.y || averagedSamples[i + 1]?.y || 0;
+            
+            // Look for local maxima (fret is higher than surrounding area)
+            // Check both immediate neighbors and slightly further ones
+            const isLocalMax = currY > prevY + heightThreshold && 
+                              currY > nextY + heightThreshold &&
+                              currY > prev2Y + heightThreshold * 0.5 &&
+                              currY > next2Y + heightThreshold * 0.5;
+            
+            if (isLocalMax) {
+                fretCandidates.push({
+                    x: averagedSamples[i].x,
+                    y: averagedSamples[i].maxY,
+                    z: neckRegion.centerZ
+                });
+            }
+        }
+        
+        // Group nearby candidates using improved grouping function
+        // Use larger tolerance (1.5cm) to account for fret thickness
+        const groupedFrets = groupFretCandidates(fretCandidates, 0.015);
+        
+        // Sort by X position and filter to valid range
+        groupedFrets.sort((a, b) => a.x - b.x);
+        const validFrets = groupedFrets.filter(f => f.x > nutX && f.x < neckEndX);
+        
+        console.log(`Found ${validFrets.length} frets using raycasting on fret container:`);
+        validFrets.forEach((fret, i) => {
+            console.log(`  Fret ${i + 1}: X=${fret.x.toFixed(3)}, Y=${fret.y.toFixed(3)}, Z=${fret.z.toFixed(3)}`);
+        });
+        
+        if (validFrets.length >= NUM_FRETS - 1) {
+            console.log(`Extracted ${validFrets.length} fret positions from fret container using raycasting`);
+            return validFrets.slice(0, NUM_FRETS - 1);
+        } else if (validFrets.length > 0) {
+            console.log(`Found ${validFrets.length} frets using raycasting`);
+            return validFrets;
+        }
+    }
+
+    // If we couldn't find the circulo mesh or extract frets, return null
+    console.warn('Could not find fret container mesh "circulo.009_circulo.060" or extract fret positions from geometry');
+    return null;
+}
+
+/**
+ * Calculate fret positions using standard guitar fret spacing formula
+ * Used as fallback when geometry extraction doesn't work
+ */
+function findFretPositionsUsingCalculation(neckRegion) {
+    if (!neckRegion) return null;
 
     const fretPositions = [];
     const raycaster = new THREE.Raycaster();
-    
+
     // Get all meshes for raycasting
     const meshes = [];
     guitarModel.traverse((child) => {
@@ -447,27 +1038,27 @@ function findFretPositionsUsingRaycasting(neckRegion) {
     });
 
     // Calculate fret positions using logarithmic spacing
-    // Use the full neck length for scale length calculation
-    const scaleLength = neckRegion.length * 0.9;
+    // Use the exact scale length if available, otherwise estimate
+    const scaleLength = neckRegion.scaleLength || (neckRegion.length * 0.9);
     const nutX = neckRegion.nutX || neckRegion.startX;
-    
+
+    console.log(`Using Scale Length: ${scaleLength.toFixed(3)}, Nut Position: ${nutX.toFixed(3)}`);
+
     // For each fret (1-12), calculate position from the nut
     for (let fret = 1; fret < NUM_FRETS; fret++) {
         // Logarithmic fret spacing formula: distance = scaleLength * (1 - 2^(-fret/12))
         const distanceFromNut = scaleLength * (1 - Math.pow(2, -fret / 12));
         const fretX = nutX + distanceFromNut;
-        
+
         // Cast a ray from above the model down to find the fretboard surface
-        // Cast at the center of the neck width
         const rayOrigin = new THREE.Vector3(fretX, neckRegion.y + 0.5, neckRegion.centerZ);
         const rayDirection = new THREE.Vector3(0, -1, 0);
-        
+
         raycaster.set(rayOrigin, rayDirection);
         const intersects = raycaster.intersectObjects(meshes, false);
-        
+
         let bestY = neckRegion.y;
         if (intersects.length > 0) {
-            // Use the first intersection (closest surface)
             bestY = intersects[0].point.y;
         }
 
@@ -478,8 +1069,141 @@ function findFretPositionsUsingRaycasting(neckRegion) {
         });
     }
 
-    console.log(`Found ${fretPositions.length} fret positions, starting at X=${fretPositions[0]?.x.toFixed(3)} (fret 1)`);
+
+    console.log(`Calculated ${fretPositions.length} fret positions, starting at X=${fretPositions[0]?.x.toFixed(3)} (fret 1), ending at X=${fretPositions[fretPositions.length - 1]?.x.toFixed(3)} (fret ${fretPositions.length})`);
     return fretPositions;
+}
+
+/**
+ * Extract string objects from the guitar model
+ * Looks for 'Cuerdas' objects which represent the physical strings
+ */
+function extractStringObjects() {
+    if (!guitarModel) return null;
+
+    const stringObjects = [];
+
+    guitarModel.traverse((child) => {
+        if (child.isMesh && child.name) {
+            // Look for string objects (Cuerdas in Spanish)
+            if (child.name.toLowerCase().includes('cuerda')) {
+                stringObjects.push(child);
+            }
+        }
+    });
+
+    console.log(`Found ${stringObjects.length} string objects in model:`, stringObjects.map(s => s.name));
+    return stringObjects;
+}
+
+/**
+ * Get the Z position of a string at a specific X position (fret location)
+ * by analyzing its geometry
+ */
+function getStringPositionAtX(stringMesh, targetX) {
+    if (!stringMesh || !stringMesh.geometry) return null;
+
+    const geometry = stringMesh.geometry;
+    const positions = geometry.attributes.position;
+
+    if (!positions) return null;
+
+    // Get world matrix to transform local coordinates to world coordinates
+    stringMesh.updateMatrixWorld(true);
+    const worldMatrix = stringMesh.matrixWorld;
+
+    const vertex = new THREE.Vector3();
+    let closestVertex = null;
+    let closestDistance = Infinity;
+
+    // Find vertex closest to our target X position
+    for (let i = 0; i < positions.count; i++) {
+        vertex.fromBufferAttribute(positions, i);
+        vertex.applyMatrix4(worldMatrix);
+
+        const distance = Math.abs(vertex.x - targetX);
+        if (distance < closestDistance) {
+            closestDistance = distance;
+            closestVertex = vertex.clone();
+        }
+    }
+
+    return closestVertex;
+}
+
+/**
+ * Analyze string geometry to get positions at all fret locations
+ * Extracts positions BETWEEN frets (where hitboxes will be placed)
+ */
+function analyzeStringGeometry(stringObjects, fretPositions, neckRegion) {
+    if (!stringObjects || stringObjects.length === 0) return null;
+
+    // Sort strings by their Z position at the first fret
+    const firstFretX = fretPositions[0]?.x || -2.6;
+
+    const stringsWithPositions = stringObjects.map(stringMesh => {
+        const pos = getStringPositionAtX(stringMesh, firstFretX);
+        return {
+            mesh: stringMesh,
+            name: stringMesh.name,
+            zAtFirstFret: pos ? pos.z : 0
+        };
+    });
+
+    // Sort by Z position (from low to high, which corresponds to string 1-6)
+    stringsWithPositions.sort((a, b) => a.zAtFirstFret - b.zAtFirstFret);
+
+    console.log('Sorted strings:', stringsWithPositions.map(s => ({
+        name: s.name,
+        z: s.zAtFirstFret.toFixed(3)
+    })));
+
+    // Extract positions BETWEEN frets (where hitboxes will be placed)
+    // fretIndex 0 = between nut and fret 1
+    // fretIndex 1 = between fret 1 and fret 2
+    // etc.
+    const stringPositionsByFret = [];
+    const nutX = neckRegion.nutX || neckRegion.startX;
+
+    for (let fretIndex = 0; fretIndex < fretPositions.length; fretIndex++) {
+        // Calculate the X position where the hitbox will be (between this fret and the next)
+        // Use the same calculation as in createFretZones to ensure consistency
+        let targetX;
+
+        if (fretIndex === 0) {
+            // First fret: between nut and fret 1
+            const fretStartX = nutX;
+            const fretEndX = fretPositions[0].x;
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        } else {
+            // All other frets: between previous fret and current fret
+            const fretStartX = fretPositions[fretIndex - 1].x;
+            const fretEndX = fretPositions[fretIndex].x;
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            const boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        }
+
+        const stringPositions = [];
+
+        for (let stringIndex = 0; stringIndex < Math.min(6, stringsWithPositions.length); stringIndex++) {
+            const stringData = stringsWithPositions[stringIndex];
+            const pos = getStringPositionAtX(stringData.mesh, targetX);
+
+            if (pos) {
+                stringPositions.push({
+                    y: pos.y,
+                    z: pos.z
+                });
+            }
+        }
+
+        stringPositionsByFret.push(stringPositions);
+    }
+
+    return stringPositionsByFret;
 }
 
 function analyzeGuitarModel() {
@@ -489,159 +1213,24 @@ function analyzeGuitarModel() {
     const neckRegion = findNeckRegion();
     if (!neckRegion) return null;
 
-    // Find fret positions using raycasting
-    let fretPositions = findFretPositionsUsingRaycasting(neckRegion);
-    
+    // Find fret positions from geometry only (no calculation fallback)
+    let fretPositions = extractFretPositionsFromGeometry(neckRegion);
+
     if (!fretPositions || fretPositions.length === 0) {
-        // Fallback to simple calculation
-        const scaleLength = neckRegion.length * 0.9;
-        const nutX = neckRegion.nutX || neckRegion.startX;
-        fretPositions = [];
-        
-        for (let fret = 1; fret < NUM_FRETS; fret++) {
-            const distanceFromNut = scaleLength * (1 - Math.pow(2, -fret / 12));
-            fretPositions.push({
-                x: nutX + distanceFromNut,
-                y: neckRegion.y,
-                z: neckRegion.centerZ
-            });
-        }
+        console.error('Could not extract fret positions from geometry. Make sure the mesh "circulo.009_circulo.060" exists in the model.');
+        return null;
     }
 
-    // Calculate string positions (evenly spaced across the neck width)
-    // Ensure we have exactly 6 strings
-    const stringPositions = [];
-    
-    // Use the actual model bounding box to determine the Z range
-    const overallBox = neckRegion.overallBox;
-    const zMin = overallBox.min.z;
-    const zMax = overallBox.max.z;
-    const zCenter = (zMin + zMax) / 2;
-    const zRange = zMax - zMin;
-    
-    // Try to find string-like objects in the model first
-    const stringMeshes = [];
-    guitarModel.traverse((child) => {
-        if (child.isMesh && child.geometry) {
-            const childBox = new THREE.Box3().setFromObject(child);
-            const childSize = childBox.getSize(new THREE.Vector3());
-            const childCenter = childBox.getCenter(new THREE.Vector3());
-            
-            // Look for thin, long objects that could be strings
-            // Strings are typically very thin in one dimension and long in another
-            const maxDim = Math.max(childSize.x, childSize.y, childSize.z);
-            const minDim = Math.min(childSize.x, childSize.y, childSize.z);
-            
-            // Check if it's a thin, long object (could be a string)
-            if (minDim < 0.01 && maxDim > 1.0) {
-                // Check if it's in the neck region (X axis) and centered in Y
-                if (childCenter.x >= neckRegion.startX && childCenter.x <= neckRegion.startX + neckRegion.length) {
-                    stringMeshes.push({
-                        z: childCenter.z,
-                        mesh: child
-                    });
-                }
-            }
-        }
-    });
-    
-    // If we found string-like objects, use them
-    if (stringMeshes.length >= 4) {
-        // ... (existing code for string meshes) ...
-        // Sort by Z position
-        stringMeshes.sort((a, b) => a.z - b.z);
-        // ...
-    } else {
-        // Fallback: Use raycasting to measure the actual neck width
-        // First, get all meshes for raycasting
-        const meshes = [];
-        guitarModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                meshes.push(child);
-            }
-        });
-        
-        // Scan across the Z axis at a middle fret position
-        const scanX = neckRegion.startX + neckRegion.length * 0.4; // Around 5th-7th fret
-        const scanY = neckRegion.y + 1.0; // Start ray above
-        
-        let minZ = zCenter;
-        let maxZ = zCenter;
-        let foundNeck = false;
-        
-        const raycaster = new THREE.Raycaster();
-        const dir = new THREE.Vector3(0, -1, 0);
-        const steps = 50;
-        const scanWidth = zRange * 0.8; // Scan 80% of total width
-        const stepSize = scanWidth / steps;
-        
-        // Scan for min Z (left edge)
-        for (let z = zCenter; z > zCenter - scanWidth/2; z -= stepSize) {
-            raycaster.set(new THREE.Vector3(scanX, scanY, z), dir);
-            if (raycaster.intersectObjects(meshes, false).length > 0) {
-                minZ = z;
-                foundNeck = true;
-            } else if (foundNeck) {
-                // Edge found
-                break;
-            }
-        }
-        
-        // Scan for max Z (right edge)
-        foundNeck = false; // Reset for right scan
-        for (let z = zCenter; z < zCenter + scanWidth/2; z += stepSize) {
-            raycaster.set(new THREE.Vector3(scanX, scanY, z), dir);
-            if (raycaster.intersectObjects(meshes, false).length > 0) {
-                maxZ = z;
-                foundNeck = true;
-            } else if (foundNeck) {
-                // Edge found
-                break;
-            }
-        }
-        
-        const measuredNeckWidth = maxZ - minZ;
-        
-        if (measuredNeckWidth > 0.1) {
-            console.log(`Measured neck width via raycasting: ${measuredNeckWidth.toFixed(3)} (from ${minZ.toFixed(3)} to ${maxZ.toFixed(3)})`);
-            
-            // Apply margins - strings don't go to the very edge of the neck
-            const margin = measuredNeckWidth * 0.10; // 10% margin on each side
-            const usableWidth = measuredNeckWidth - (2 * margin);
-            const startZ = minZ + margin;
-            
-            const stringSpacing = usableWidth / (STRING_TUNING.length - 1);
-            
-            for (let i = 0; i < STRING_TUNING.length; i++) {
-                stringPositions.push(startZ + (i * stringSpacing));
-            }
-        } else {
-            // Fallback to estimation if measurement failed
-            console.warn("Neck measurement failed, using fallback estimation");
-            const estimatedNeckWidth = zRange * 0.38;
-            const estimatedNeckMinZ = zCenter - estimatedNeckWidth / 2;
-            const stringSpacing = estimatedNeckWidth / (STRING_TUNING.length - 1);
-            
-            for (let i = 0; i < STRING_TUNING.length; i++) {
-                const stringZ = estimatedNeckMinZ + (i * stringSpacing);
-                stringPositions.push(stringZ);
-            }
-        }
-    }
-
-    console.log(`Calculated ${stringPositions.length} string positions for ${STRING_TUNING.length} strings:`, stringPositions.map(p => p.toFixed(3)));
-    console.log(`Model Z range: ${zMin.toFixed(3)} to ${zMax.toFixed(3)}, total width: ${zRange.toFixed(3)}`);
-    console.log(`String positions range: ${Math.min(...stringPositions).toFixed(3)} to ${Math.max(...stringPositions).toFixed(3)}`);
-
+    // We'll calculate string positions later using raycasting at each fret
+    // For now, return a placeholder that will be populated during hitbox creation
     return {
         fretPositions: fretPositions,
-        stringPositions: stringPositions,
         neckBox: neckRegion.overallBox,
         neckCenter: new THREE.Vector3(neckRegion.startX + neckRegion.length / 2, neckRegion.y, neckRegion.centerZ),
         neckSize: new THREE.Vector3(neckRegion.length, 0.1, neckRegion.width),
         neckAxis: 'x',
         stringAxis: 'z',
-        neckRegion: neckRegion // Include full neck region for taper calculation
+        neckRegion: neckRegion // Include full neck region
     };
 }
 
@@ -649,10 +1238,39 @@ function createFretZones() {
     // Clear existing zones
     fretZones.forEach(zone => scene.remove(zone));
     fretZones = [];
-
-    // Analyze the model to get fret and string positions
-    const analysis = analyzeGuitarModel();
     
+    // Different colors for each fret row to visualize overlaps
+    // All strings on the same fret get the same color
+    const fretColors = [
+        0xff0000, // Red - Fret 1
+        0x00ff00, // Green - Fret 2
+        0x0000ff, // Blue - Fret 3
+        0xffff00, // Yellow - Fret 4
+        0xff00ff, // Magenta - Fret 5
+        0x00ffff, // Cyan - Fret 6
+        0xff8800, // Orange - Fret 7
+        0x8800ff, // Purple - Fret 8
+        0x00ff88, // Teal - Fret 9
+        0xff0088, // Pink - Fret 10
+        0x88ff00, // Lime - Fret 11
+        0x0088ff, // Light Blue - Fret 12
+        0xff4444, // Light Red - Fret 13
+        0x44ff44, // Light Green - Fret 14
+        0x4444ff, // Light Blue - Fret 15
+        0xffff44, // Light Yellow - Fret 16
+        0xff44ff, // Light Magenta - Fret 17
+        0x44ffff, // Light Cyan - Fret 18
+        0xffaa00, // Amber - Fret 19
+        0xaa00ff, // Violet - Fret 20
+        0x00aaff, // Sky Blue - Fret 21
+        0xaaff00, // Chartreuse - Fret 22
+        0xff00aa, // Rose - Fret 23
+        0x00ffaa  // Spring Green - Fret 24
+    ];
+
+    // Analyze the model to get fret positions
+    const analysis = analyzeGuitarModel();
+
     if (!analysis) {
         console.warn('Could not analyze guitar model, using fallback positions');
         // Fallback to old hardcoded positions
@@ -668,7 +1286,7 @@ function createFretZones() {
                 const fretX = neckStartZ + (fretIndex * fretSpacing);
                 let centerX = fretX;
                 let boxWidth = fretSpacing; // Default to fret spacing
-                
+
                 if (fretIndex < NUM_FRETS - 1) {
                     // Center exactly between current and next fret
                     const nextFretX = neckStartZ + ((fretIndex + 1) * fretSpacing);
@@ -680,19 +1298,19 @@ function createFretZones() {
                     centerX = (fretX + prevFretX) / 2;
                     boxWidth = fretX - prevFretX; // Exact distance between frets
                 }
-                
+
                 // Create box geometry for fret hitbox
                 // Width: exact distance between frets
                 // Height: small height above fretboard
                 const boxHeight = 0.08;
                 // Depth: slightly wider than a string (not the space between strings)
                 const boxDepth = Math.min(stringSpacing * 0.3, 0.02); // Max 30% of string spacing or 0.02
-                
+
                 const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
                 const material = new THREE.MeshBasicMaterial({
-                    color: 0xff0000,
+                    color: fretColors[fretIndex] || 0xff0000,
                     transparent: true,
-                    opacity: 0.5
+                    opacity: 0.6 // Higher opacity to better see overlaps between frets
                 });
 
                 const zone = new THREE.Mesh(geometry, material);
@@ -715,245 +1333,144 @@ function createFretZones() {
     }
 
     // Use analyzed positions
-    const { fretPositions, stringPositions, neckAxis, stringAxis, neckRegion } = analysis;
+    const { fretPositions, neckRegion } = analysis;
 
-    // Get all meshes for raycasting validation
+    console.log(`Creating hitboxes for ${STRING_TUNING.length} strings and ${fretPositions.length} frets`);
+
+    // Extract string objects from the model
+    const stringObjects = extractStringObjects();
+
+    if (!stringObjects || stringObjects.length < 6) {
+        console.warn(`Expected 6 string objects but found ${stringObjects?.length || 0}, using fallback`);
+        // Fall back to estimation if we don't have string geometry
+        useFallbackHitboxes(fretPositions, neckRegion);
+        return;
+    }
+
+    // Analyze string geometry to get positions at all frets
+    const stringPositionsByFret = analyzeStringGeometry(stringObjects, fretPositions, neckRegion);
+
+    if (!stringPositionsByFret || stringPositionsByFret.length === 0) {
+        console.warn('Could not extract string positions from geometry, using fallback');
+        useFallbackHitboxes(fretPositions, neckRegion);
+        return;
+    }
+
+    console.log(`Extracted string positions for ${stringPositionsByFret.length} frets`);
+
+    // Get all meshes for raycasting to find exact fretboard surface
     const meshes = [];
     guitarModel.traverse((child) => {
         if (child.isMesh && child.geometry) {
             meshes.push(child);
         }
     });
-
-    // Get overall bounding box once for validation
-    const overallBox = new THREE.Box3().setFromObject(guitarModel);
-    
     const raycaster = new THREE.Raycaster();
 
-    // Create hitboxes at the intersection of each fret and string
-    // Ensure we loop through all 6 strings
-    console.log(`Creating hitboxes for ${STRING_TUNING.length} strings and ${fretPositions.length} frets`);
-    
-    for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
-        let hitboxesForThisString = 0;
-        
-        for (let fretIndex = 0; fretIndex < fretPositions.length && fretIndex < NUM_FRETS - 1; fretIndex++) {
-            const fretPos = fretPositions[fretIndex];
+    // Create hitboxes using the extracted geometry
+    // We need to calculate the EXACT SAME X position that was used in analyzeStringGeometry
+    // fretIndex 0 = between nut and fret 1  
+    // fretIndex 1 = between fret 1 and fret 2
+    // etc.
+    for (let fretIndex = 0; fretIndex < stringPositionsByFret.length && fretIndex < NUM_FRETS - 1; fretIndex++) {
+        const nutX = neckRegion.nutX || neckRegion.startX;
+
+        // Calculate the EXACT SAME X position that was used in analyzeStringGeometry
+        // Hitboxes should be BETWEEN frets, not over them
+        let targetX, fretStartX, fretEndX, boxWidth;
+
+        if (fretIndex === 0) {
+            // First fret: between nut and fret 1
+            fretStartX = nutX;
+            fretEndX = fretPositions[0].x;
             
-            // Ensure we have a valid string position for this string index
-            if (stringIndex >= stringPositions.length) {
-                console.warn(`String index ${stringIndex} out of range (${stringPositions.length} positions available)`);
+            // Validate: fretEndX should be greater than fretStartX
+            if (fretEndX <= fretStartX) {
+                console.warn(`Fret ${fretIndex + 1}: Invalid fret positions (start=${fretStartX.toFixed(3)}, end=${fretEndX.toFixed(3)}), skipping`);
                 continue;
             }
             
+            // Make box slightly smaller to avoid overlapping with nut and fret
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        } else {
+            // All other frets: between previous fret and current fret
+            if (fretIndex - 1 >= fretPositions.length || fretIndex >= fretPositions.length) {
+                console.warn(`Fret ${fretIndex + 1}: Missing fret positions, skipping`);
+                continue;
+            }
+            
+            fretStartX = fretPositions[fretIndex - 1].x;
+            fretEndX = fretPositions[fretIndex].x;
+            
+            // Validate: fretEndX should be greater than fretStartX
+            if (fretEndX <= fretStartX) {
+                console.warn(`Fret ${fretIndex + 1}: Invalid fret positions (start=${fretStartX.toFixed(3)}, end=${fretEndX.toFixed(3)}), skipping`);
+                continue;
+            }
+            
+            // Make box slightly smaller to avoid overlapping with frets
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            targetX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        }
+
+        // Debug: log the first few frets to see positioning
+        if (fretIndex < 3 || fretIndex >= stringPositionsByFret.length - 1) {
+            console.log(`Fret ${fretIndex + 1}: fretStart=${fretStartX.toFixed(3)}, fretEnd=${fretEndX.toFixed(3)}, hitbox targetX=${targetX.toFixed(3)}, width=${boxWidth.toFixed(3)}`);
+        }
+
+        // Get string positions at this fret from the extracted geometry
+        const stringPositions = stringPositionsByFret[fretIndex];
+
+        if (!stringPositions || stringPositions.length < STRING_TUNING.length) {
+            console.warn(`Fret ${fretIndex + 1}: expected 6 strings but got ${stringPositions?.length || 0}`);
+            continue;
+        }
+
+        // Create hitboxes for each string at this fret
+        for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
             const stringPos = stringPositions[stringIndex];
 
-            // Calculate position: exactly on the string, exactly between two frets
-            // First, determine the X position (fret position) - exactly between this fret and next
-            let posX;
-            let fretStartX, fretEndX;
-            
-            if (fretIndex < fretPositions.length - 1) {
-                // Center exactly between this fret and the next fret
-                fretStartX = fretPositions[fretIndex].x;
-                fretEndX = fretPositions[fretIndex + 1].x;
-                posX = (fretStartX + fretEndX) / 2; // Exact center between frets
-            } else if (fretIndex > 0) {
-                // Last fret - center between previous and current fret
-                fretStartX = fretPositions[fretIndex - 1].x;
-                fretEndX = fretPositions[fretIndex].x;
-                posX = (fretStartX + fretEndX) / 2; // Exact center between frets
-            } else {
-                // First fret - use position between nut and first fret
-                const nutX = neckRegion.nutX || neckRegion.startX;
-                fretStartX = nutX;
-                fretEndX = fretPositions[0].x;
-                posX = (fretStartX + fretEndX) / 2; // Center between nut and first fret
-            }
-            
-            // Calculate string position at this specific fret position
-            // Strings taper (converge) as they go from nut to body
-            // We need to interpolate the string Z position based on the X position (fret position)
-            
-            // Get the neck region for interpolation
-            const neckStartX = neckRegion.startX; // Nut position (fret 0)
-            const neckEndX = neckRegion.startX + neckRegion.length; // End of neck (around fret 12)
-            const neckLength = neckEndX - neckStartX;
-            
-            // Calculate taper: strings are wider at the nut, narrower at the body
-            // Use the string positions at the nut (start) and interpolate to narrower at the end
-            const nutZMin = stringPositions[0]; // First string at nut
-            const nutZMax = stringPositions[stringPositions.length - 1]; // Last string at nut
-            const nutWidth = nutZMax - nutZMin;
-            
-            // Estimate body width (typically 15-20% narrower than nut)
-            const taperRatio = 0.85; // Strings are 85% of nut width at body
-            const bodyWidth = nutWidth * taperRatio;
-            const bodyZCenter = (nutZMin + nutZMax) / 2; // Center stays the same
-            const bodyZMin = bodyZCenter - bodyWidth / 2;
-            const bodyZMax = bodyZCenter + bodyWidth / 2;
-            
-            // Interpolate based on X position (how far along the neck)
-            const progress = (posX - neckStartX) / neckLength; // 0 at nut, 1 at body
-            const clampedProgress = Math.max(0, Math.min(1, progress)); // Clamp between 0 and 1
-            
-            // Interpolate string positions at this fret
-            const currentZMin = nutZMin + (bodyZMin - nutZMin) * clampedProgress;
-            const currentZMax = nutZMax + (bodyZMax - nutZMax) * clampedProgress;
-            const currentWidth = currentZMax - currentZMin;
-            
-            // Calculate this string's Z position based on its index at this specific fret
-            const stringSpacing = currentWidth / (STRING_TUNING.length - 1);
-            const stringZ = currentZMin + (stringIndex * stringSpacing);
-            
-            // Position exactly on the string (Z position for strings running along Z axis)
-            let posY = fretPos.y; // Start with fretboard Y position
-            let posZ = stringZ; // Use interpolated string position at this fret
-            
-            // Ensure we're using the correct axis
-            if (stringAxis === 'z') {
-                posZ = stringZ; // Interpolated string position (Z axis)
-            } else if (stringAxis === 'y') {
-                posY = stringZ; // Interpolated string position (Y axis)
-            } else {
-                posX = stringZ; // Interpolated string position (X axis)
-            }
-            
-            // Debug logging for first few hitboxes
-            if (stringIndex < 2 && fretIndex < 2) {
-                console.log(`Hitbox ${stringIndex}-${fretIndex}: fretStartX=${fretStartX.toFixed(3)}, fretEndX=${fretEndX.toFixed(3)}, posX=${posX.toFixed(3)}, stringZ=${stringZ.toFixed(3)}, posZ=${posZ.toFixed(3)}`);
-            }
-
-            // Validate position: check if it's within the model bounds and on the surface
-            // First, check if Z position is within reasonable bounds of the model
-            const modelZMin = overallBox.min.z;
-            const modelZMax = overallBox.max.z;
-            const modelZRange = modelZMax - modelZMin;
-            
-            // Use a wider valid range - 75% of model width centered on model
-            // This should allow all strings including the outer ones
-            const validZCenter = (modelZMin + modelZMax) / 2;
-            const validZWidth = modelZRange * 0.75; // 75% of model width (increased from 65%)
-            const validZMin = validZCenter - validZWidth / 2;
-            const validZMax = validZCenter + validZWidth / 2;
-            
-            if (posZ < validZMin || posZ > validZMax) {
-                // Position is outside valid range, skip this hitbox
+            if (!stringPos) {
+                console.warn(`Fret ${fretIndex + 1}, String ${stringIndex + 1}: no position data`);
                 continue;
             }
-            
-            // Validate Y position by checking if it's near the model surface
-            // Try multiple raycast positions to find the surface
-            let foundValidPosition = false;
-            let finalY = posY;
-            
-            // Cast rays at the exact position and slightly offset positions
-            const rayOffsets = [
-                { x: 0, z: 0 },      // Exact position
-                { x: 0, z: 0.02 },   // Slightly right
-                { x: 0, z: -0.02 },  // Slightly left
-                { x: 0.02, z: 0 },   // Slightly forward
-                { x: -0.02, z: 0 }   // Slightly back
-            ];
-            
-            for (const offset of rayOffsets) {
-                const rayOrigin = new THREE.Vector3(posX + offset.x, posY + 0.5, posZ + offset.z);
-                const rayDirection = new THREE.Vector3(0, -1, 0);
-                raycaster.set(rayOrigin, rayDirection);
-                const intersects = raycaster.intersectObjects(meshes, false);
 
-                if (intersects.length > 0) {
-                    // Use the intersection point, but keep it slightly above the surface
-                    const surfaceY = intersects[0].point.y;
-                    const distanceFromSurface = Math.abs(posY - surfaceY);
-                    
-                    // Use a reasonable threshold (0.3 units) to validate position
-                    if (distanceFromSurface < 0.3) {
-                        finalY = surfaceY + 0.01; // Slightly above surface for better clicking
-                        foundValidPosition = true;
-                        break; // Found valid position, no need to check other offsets
-                    }
-                }
-            }
-            
-            // If we didn't find a valid position with raycasting, use the calculated Y
-            // This allows hitboxes even if raycasting misses (which can happen at edges)
-            // Always use the calculated Y position - raycasting is just for fine-tuning
-            if (!foundValidPosition) {
-                // Use calculated Y position from fret position
-                finalY = fretPos.y;
-            }
-            
-            posY = finalY;
+            // Use the EXACT target X position (center between frets)
+            const posX = targetX;
+            const posY = stringPos.y + 0.01; // Slightly above string
+            const posZ = stringPos.z;
 
-            // Calculate box dimensions
-            // Width: exact distance between the two frets (already calculated above)
-            let boxWidth;
-            
-            if (fretIndex < fretPositions.length - 1) {
-                // Between current fret and next fret
-                boxWidth = fretEndX - fretStartX; // Full distance between frets
-            } else if (fretIndex > 0) {
-                // Last fret - between previous and current fret
-                boxWidth = fretEndX - fretStartX; // Full distance between frets
-            } else {
-                // First fret - between nut and first fret
-                boxWidth = fretEndX - fretStartX; // Full distance between nut and first fret
+            // Debug first few hitboxes
+            if (fretIndex < 2 && stringIndex < 2) {
+                console.log(`Hitbox Fret ${fretIndex + 1}, String ${stringIndex + 1}: posX=${posX.toFixed(3)}, posY=${posY.toFixed(3)}, posZ=${posZ.toFixed(3)}`);
             }
-            
-            // Height: small height above fretboard for clicking
+            // Calculate box depth
+            let boxDepth = 0.012;
+            if (stringIndex < STRING_TUNING.length - 1 && stringPositions[stringIndex + 1]) {
+                const nextStringZ = stringPositions[stringIndex + 1].z;
+                boxDepth = Math.min(Math.abs(nextStringZ - posZ) * 0.3, 0.02);
+            } else if (stringIndex > 0 && stringPositions[stringIndex - 1]) {
+                const prevStringZ = stringPositions[stringIndex - 1].z;
+                boxDepth = Math.min(Math.abs(posZ - prevStringZ) * 0.3, 0.02);
+            }
+            boxDepth = Math.max(0.008, boxDepth);
+
             const boxHeight = 0.04;
-            
-            // Depth: very narrow, just slightly wider than a string
-            // Calculate based on string spacing at this fret position to avoid overlap
-            let boxDepth = 0.012; // Default: very narrow
-            
-            // Calculate string spacing at this fret position
-            if (stringIndex < STRING_TUNING.length - 1) {
-                // Calculate next string's Z position at this fret
-                const nextStringProgress = (posX - neckStartX) / neckLength;
-                const clampedNextProgress = Math.max(0, Math.min(1, nextStringProgress));
-                const nextStringZMin = nutZMin + (bodyZMin - nutZMin) * clampedNextProgress;
-                const nextStringZMax = nutZMax + (bodyZMax - nutZMax) * clampedNextProgress;
-                const nextStringWidth = nextStringZMax - nextStringZMin;
-                const nextStringSpacing = nextStringWidth / (STRING_TUNING.length - 1);
-                const nextStringZ = nextStringZMin + ((stringIndex + 1) * nextStringSpacing);
-                
-                // Use 30% of the distance to next string to avoid overlap
-                const distanceToNext = Math.abs(nextStringZ - posZ);
-                boxDepth = Math.min(distanceToNext * 0.3, 0.02); // Max 0.02
-            } else if (stringIndex > 0) {
-                // Last string - use distance from previous string
-                const prevStringProgress = (posX - neckStartX) / neckLength;
-                const clampedPrevProgress = Math.max(0, Math.min(1, prevStringProgress));
-                const prevStringZMin = nutZMin + (bodyZMin - nutZMin) * clampedPrevProgress;
-                const prevStringZMax = nutZMax + (bodyZMax - nutZMax) * clampedPrevProgress;
-                const prevStringWidth = prevStringZMax - prevStringZMin;
-                const prevStringSpacing = prevStringWidth / (STRING_TUNING.length - 1);
-                const prevStringZ = prevStringZMin + ((stringIndex - 1) * prevStringSpacing);
-                
-                // Use 30% of the distance from previous string
-                const distanceFromPrev = Math.abs(posZ - prevStringZ);
-                boxDepth = Math.min(distanceFromPrev * 0.3, 0.02); // Max 0.02
-            }
-            
-            // Ensure minimum depth for usability
-            boxDepth = Math.max(0.008, boxDepth); // At least 0.008 
-            
+
             const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
             const material = new THREE.MeshBasicMaterial({
-                color: 0xff0000, // Red for debugging
+                color: fretColors[fretIndex] || 0xff0000,
                 transparent: true,
-                opacity: 0.3, // More transparent to see strings
+                opacity: 0.6, // Higher opacity to better see overlaps between frets
                 side: THREE.DoubleSide
             });
 
             const zone = new THREE.Mesh(geometry, material);
-
-            // Position at the intersection of fret and string
             zone.position.set(posX, posY, posZ);
 
-            // Store metadata (fretIndex + 1 because we start counting from fret 1)
             zone.userData = {
                 stringIndex,
                 fretIndex: fretIndex + 1,
@@ -962,21 +1479,254 @@ function createFretZones() {
 
             scene.add(zone);
             fretZones.push(zone);
-            hitboxesForThisString++;
         }
-        
-        console.log(`String ${stringIndex + 1}: Created ${hitboxesForThisString} hitboxes`);
     }
 
-    console.log('Created fret zones based on model analysis:', {
-        fretCount: fretPositions.length,
-        stringCount: stringPositions.length,
-        expectedStrings: STRING_TUNING.length,
-        zonesCreated: fretZones.length,
-        expectedZones: STRING_TUNING.length * fretPositions.length,
-        neckAxis: neckAxis,
-        stringAxis: stringAxis
+    console.log(`Created ${fretZones.length} hitboxes (expected: ${STRING_TUNING.length * fretPositions.length})`);
+}
+
+// Fallback function for when string geometry is not available
+function useFallbackHitboxes(fretPositions, neckRegion) {
+    // Different colors for each fret row to visualize overlaps
+    // All strings on the same fret get the same color
+    const fretColors = [
+        0xff0000, // Red - Fret 1
+        0x00ff00, // Green - Fret 2
+        0x0000ff, // Blue - Fret 3
+        0xffff00, // Yellow - Fret 4
+        0xff00ff, // Magenta - Fret 5
+        0x00ffff, // Cyan - Fret 6
+        0xff8800, // Orange - Fret 7
+        0x8800ff, // Purple - Fret 8
+        0x00ff88, // Teal - Fret 9
+        0xff0088, // Pink - Fret 10
+        0x88ff00, // Lime - Fret 11
+        0x0088ff, // Light Blue - Fret 12
+        0xff4444, // Light Red - Fret 13
+        0x44ff44, // Light Green - Fret 14
+        0x4444ff, // Light Blue - Fret 15
+        0xffff44, // Light Yellow - Fret 16
+        0xff44ff, // Light Magenta - Fret 17
+        0x44ffff, // Light Cyan - Fret 18
+        0xffaa00, // Amber - Fret 19
+        0xaa00ff, // Violet - Fret 20
+        0x00aaff, // Sky Blue - Fret 21
+        0xaaff00, // Chartreuse - Fret 22
+        0xff00aa, // Rose - Fret 23
+        0x00ffaa  // Spring Green - Fret 24
+    ];
+    
+    const overallBox = new THREE.Box3().setFromObject(guitarModel);
+    const zMin = overallBox.min.z;
+    const zMax = overallBox.max.z;
+    const zCenter = (zMin + zMax) / 2;
+    const zRange = zMax - zMin;
+
+    const estimatedNeckWidth = zRange * 0.38;
+    const margin = estimatedNeckWidth * 0.10;
+    const usableWidth = estimatedNeckWidth - (2 * margin);
+    const startZ = zCenter - estimatedNeckWidth / 2 + margin;
+    const stringSpacing = usableWidth / (STRING_TUNING.length - 1);
+    const avgY = neckRegion.y;
+
+    // Calculate taper
+    const nutZMin = startZ;
+    const nutZMax = startZ + usableWidth;
+    const nutWidth = nutZMax - nutZMin;
+    const nutZCenter = (nutZMin + nutZMax) / 2;
+    const taperRatio = 0.88;
+    const bodyWidth = nutWidth * taperRatio;
+    const bodyZMin = nutZCenter - bodyWidth / 2;
+    const bodyZMax = nutZCenter + bodyWidth / 2;
+
+    const neckStartX = neckRegion.startX;
+    const neckEndX = neckRegion.startX + neckRegion.length;
+    const neckLength = neckEndX - neckStartX;
+    const nutX = neckRegion.nutX || neckRegion.startX;
+
+    for (let fretIndex = 0; fretIndex < fretPositions.length && fretIndex < NUM_FRETS - 1; fretIndex++) {
+        let posX, fretStartX, fretEndX, boxWidth;
+
+        if (fretIndex < fretPositions.length - 1) {
+            fretStartX = fretPositions[fretIndex].x;
+            fretEndX = fretPositions[fretIndex + 1].x;
+            // Make box slightly smaller to avoid overlapping with frets
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            posX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        } else if (fretIndex > 0) {
+            fretStartX = fretPositions[fretIndex - 1].x;
+            fretEndX = fretPositions[fretIndex].x;
+            // Make box slightly smaller to avoid overlapping with frets
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            posX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        } else {
+            fretStartX = nutX;
+            fretEndX = fretPositions[0].x;
+            // Make box slightly smaller to avoid overlapping with nut and fret
+            const margin = (fretEndX - fretStartX) * 0.1; // 10% margin on each side
+            boxWidth = (fretEndX - fretStartX) - (2 * margin);
+            posX = fretStartX + margin + boxWidth / 2; // Center in the space between
+        }
+
+        // Debug: log the first few frets
+        if (fretIndex < 3) {
+            console.log(`Fret ${fretIndex + 1}: fretStart=${fretStartX.toFixed(3)}, fretEnd=${fretEndX.toFixed(3)}, hitbox center=${posX.toFixed(3)}, width=${boxWidth.toFixed(3)}`);
+        }
+        const progress = Math.max(0, Math.min(1, (posX - neckStartX) / neckLength));
+        const currentZMin = nutZMin + (bodyZMin - nutZMin) * progress;
+        const currentZMax = nutZMax + (bodyZMax - nutZMax) * progress;
+        const currentWidth = currentZMax - currentZMin;
+        const currentStringSpacing = currentWidth / (STRING_TUNING.length - 1);
+
+        for (let stringIndex = 0; stringIndex < STRING_TUNING.length; stringIndex++) {
+            const stringZ = currentZMin + (stringIndex * currentStringSpacing);
+            const posY = avgY + 0.01;
+            const posZ = stringZ;
+
+            let boxDepth = 0.012;
+            if (stringIndex < STRING_TUNING.length - 1) {
+                const nextStringZ = currentZMin + ((stringIndex + 1) * currentStringSpacing);
+                boxDepth = Math.min(Math.abs(nextStringZ - stringZ) * 0.3, 0.02);
+            } else if (stringIndex > 0) {
+                const prevStringZ = currentZMin + ((stringIndex - 1) * currentStringSpacing);
+                boxDepth = Math.min(Math.abs(stringZ - prevStringZ) * 0.3, 0.02);
+            }
+            boxDepth = Math.max(0.008, boxDepth);
+
+            const boxHeight = 0.04;
+
+            const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
+            const material = new THREE.MeshBasicMaterial({
+                color: fretColors[fretIndex] || 0xff0000,
+                transparent: true,
+                opacity: 0.6, // Higher opacity to better see overlaps between frets
+                side: THREE.DoubleSide
+            });
+
+            const zone = new THREE.Mesh(geometry, material);
+            zone.position.set(posX, posY, posZ);
+
+            zone.userData = {
+                stringIndex,
+                fretIndex: fretIndex + 1,
+                note: getNoteAt(stringIndex, fretIndex + 1)
+            };
+
+            scene.add(zone);
+            fretZones.push(zone);
+        }
+    }
+
+    console.log(`Created ${fretZones.length} fallback hitboxes`);
+}
+
+/**
+ * Setup debug tooltip to show object names on mouse hover
+ */
+function setupDebugTooltip() {
+    // Create tooltip element
+    const tooltip = document.createElement('div');
+    tooltip.id = 'debug-tooltip';
+    tooltip.style.cssText = `
+        position: fixed;
+        pointer-events: none;
+        background: rgba(0, 0, 0, 0.9);
+        color: white;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 11px;
+        z-index: 10000;
+        display: none;
+        max-width: 400px;
+        word-wrap: break-word;
+        white-space: pre-line;
+        line-height: 1.4;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    `;
+    document.body.appendChild(tooltip);
+
+    // Add mousemove listener to renderer canvas
+    renderer.domElement.addEventListener('mousemove', (event) => {
+        onMouseMove(event, tooltip);
     });
+
+    // Hide tooltip when mouse leaves canvas
+    renderer.domElement.addEventListener('mouseleave', () => {
+        tooltip.style.display = 'none';
+    });
+}
+
+/**
+ * Handle mouse move for debug tooltip
+ */
+function onMouseMove(event, tooltip) {
+    if (!renderer || !camera || !scene) return;
+
+    // Calculate mouse position in normalized device coordinates
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    // Update raycaster
+    raycaster.setFromCamera(mouse, camera);
+
+    // Get all objects in the scene (including guitar model and hitboxes)
+    const allObjects = [];
+    scene.traverse((child) => {
+        if (child.isMesh) {
+            allObjects.push(child);
+        }
+    });
+
+    // Check for intersections
+    const intersects = raycaster.intersectObjects(allObjects, true);
+
+    if (intersects.length > 0) {
+        const intersectedObject = intersects[0].object;
+        
+        // Update world matrix to get accurate position
+        intersectedObject.updateMatrixWorld(true);
+        
+        // Get object name
+        let objectName = intersectedObject.name || 'Unnamed';
+        
+        // Get position
+        const position = new THREE.Vector3();
+        intersectedObject.getWorldPosition(position);
+        
+        // Get bounding box for dimensions
+        const box = new THREE.Box3().setFromObject(intersectedObject);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        
+        // Build tooltip content
+        let tooltipContent = objectName;
+        
+        // If it's a hitbox, show additional info
+        if (intersectedObject.userData && intersectedObject.userData.stringIndex !== undefined) {
+            const { stringIndex, fretIndex, note } = intersectedObject.userData;
+            tooltipContent = `Hitbox: String ${stringIndex + 1}, Fret ${fretIndex}, Note: ${note}\n`;
+        }
+        
+        // Add position and dimensions
+        tooltipContent += `\nPosition: X=${position.x.toFixed(3)}, Y=${position.y.toFixed(3)}, Z=${position.z.toFixed(3)}`;
+        tooltipContent += `\nCenter: X=${center.x.toFixed(3)}, Y=${center.y.toFixed(3)}, Z=${center.z.toFixed(3)}`;
+        tooltipContent += `\nSize: W=${size.x.toFixed(3)}, H=${size.y.toFixed(3)}, D=${size.z.toFixed(3)}`;
+        tooltipContent += `\nBounds: Min(${box.min.x.toFixed(3)}, ${box.min.y.toFixed(3)}, ${box.min.z.toFixed(3)})`;
+        tooltipContent += `\nMax(${box.max.x.toFixed(3)}, ${box.max.y.toFixed(3)}, ${box.max.z.toFixed(3)})`;
+        
+        // Show tooltip
+        tooltip.textContent = tooltipContent;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (event.clientX + 10) + 'px';
+        tooltip.style.top = (event.clientY + 10) + 'px';
+    } else {
+        // Hide tooltip if no intersection
+        tooltip.style.display = 'none';
+    }
 }
 
 function setupFretClickHandler() {
@@ -1088,7 +1838,7 @@ function renderFretboard(highlightedPositions = []) {
     // Markers go in the middle of specific fret spaces (between frets)
     fretboardHTML += '<div class="fret-markers">';
     const markerFrets = [3, 5, 7, 9, 12];
-    
+
     // Create a flex container matching the fret layout
     fretboardHTML += '<div class="fret-markers-container">';
     for (let i = 1; i < NUM_FRETS; i++) {
