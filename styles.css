@@ -832,8 +832,7 @@ body {
     
     .solution-btn {
         top: 0.4rem;
-        left: auto;
-        right: 0.4rem;
+        left: 5.5rem;
         padding: 0.35rem 0.7rem;
         font-size: 0.7rem;
     }
@@ -1019,7 +1018,7 @@ body {
 .solution-btn {
     position: absolute;
     top: 2rem;
-    left: 10rem;
+    left: 9rem;
     background: var(--glass-bg);
     border: 2px solid var(--primary-blue);
     color: var(--primary-blue);
@@ -1042,8 +1041,8 @@ body {
 
 @media (max-width: 768px) {
     .solution-btn {
-        top: 5rem;
-        left: 2rem;
+        top: 2rem;
+        left: 7rem;
         padding: 0.5rem 1rem;
         font-size: 0.85rem;
     }
