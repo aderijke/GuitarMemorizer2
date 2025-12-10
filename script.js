@@ -4196,7 +4196,11 @@ let lastMouseYCSS = 0;
 function updateCSSFretboardRotation() {
     const fretboard = document.querySelector('.fretboard');
     if (fretboard) {
-        fretboard.style.transform = `rotateX(${state.rotation.x}deg) rotateY(${state.rotation.y}deg)`;
+        // Add scale for mobile devices
+        const isMobile = window.innerWidth <= 768;
+        const isLandscape = window.innerHeight < window.innerWidth;
+        const scale = isMobile ? (isLandscape ? 0.75 : 0.85) : 1;
+        fretboard.style.transform = `rotateX(${state.rotation.x}deg) rotateY(${state.rotation.y}deg) scale(${scale})`;
     }
 }
 
@@ -4224,6 +4228,8 @@ function handleOrientationChange() {
             
             // Re-render the fretboard with current highlighted positions
             fallbackToCSS(container, gameMode);
+            // Update rotation (which includes scale for mobile)
+            updateCSSFretboardRotation();
         }
     }
 }

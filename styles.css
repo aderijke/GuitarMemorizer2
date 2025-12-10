@@ -821,6 +821,33 @@ body {
         min-height: 0;
         height: calc(100vh - 60px);
         max-height: calc(100vh - 60px);
+        padding: 0.25rem;
+        overflow-y: auto;
+    }
+    
+    .fretboard {
+        max-width: 90%;
+        margin: 0 auto;
+        transform-origin: center center;
+        padding: 0.5rem 0.25rem;
+    }
+    
+    .string-row {
+        height: 18px;
+    }
+    
+    .string-row .string-line {
+        height: 2px;
+    }
+    
+    .note-marker {
+        width: 18px;
+        height: 18px;
+        font-size: 0.55rem;
+    }
+    
+    .fret-number {
+        font-size: 0.65rem;
     }
     
     .exit-btn {
@@ -1294,7 +1321,7 @@ body {
     height: 3px;
     background: var(--string-bronze);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-    z-index: 3;
+    z-index: 1;
 }
 
 .string-row:nth-child(1) .string-line,
@@ -1331,6 +1358,7 @@ body {
     cursor: pointer;
     position: relative;
     transition: background-color 0.2s ease;
+    z-index: 5;
 }
 
 .fret:hover {
@@ -1390,7 +1418,7 @@ body {
     color: #000;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     position: relative;
-    z-index: 10;
+    z-index: 100;
     pointer-events: none;
 }
 
@@ -1552,10 +1580,33 @@ body {
 
     .fretboard-container {
         padding: 0.5rem;
+        max-height: 60vh;
+        overflow-y: auto;
     }
 
     .fretboard {
-        padding: 1rem 0.5rem;
+        padding: 0.75rem 0.5rem;
+        max-width: 95%;
+        margin: 0 auto;
+        transform-origin: center center;
+    }
+    
+    .string-row {
+        height: 22px;
+    }
+    
+    .string-row .string-line {
+        height: 2px;
+    }
+    
+    .note-marker {
+        width: 22px;
+        height: 22px;
+        font-size: 0.65rem;
+    }
+    
+    .fret-number {
+        font-size: 0.75rem;
     }
 
     .game-header {
