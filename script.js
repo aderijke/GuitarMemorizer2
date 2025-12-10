@@ -2617,15 +2617,18 @@ function fallbackToCSS(container, gameMode) {
  * Formula from fret spacing mathematics: X_n = L × (1 - 1/r^n) where r = 2^(1/12)
  * Returns array of percentages for each fret space (between frets)
  */
-function calculateFretSpacingPercentages() {
+function calculateFretSpacingPercentages(maxFrets = null) {
     const r = Math.pow(2, 1/12); // 12th root of 2 (approximately 1.059463)
     const percentages = [];
+    
+    // Use maxFrets if provided, otherwise use NUM_FRETS
+    const numFretsToCalculate = maxFrets || NUM_FRETS;
     
     // Calculate position of nut (fret 0)
     let prevPosition = 0; // Position of nut relative to scale length (0%)
     
-    // For each fret from 1 to NUM_FRETS-1, calculate the width of the space before it
-    for (let fret = 1; fret < NUM_FRETS; fret++) {
+    // For each fret from 1 to numFretsToCalculate-1, calculate the width of the space before it
+    for (let fret = 1; fret < numFretsToCalculate; fret++) {
         // Position of this fret: X_n = 1 - 1/r^n (normalized to 0-1)
         const currentPosition = 1 - (1 / Math.pow(r, fret));
         
@@ -2672,9 +2675,19 @@ function calculateFretCumulativePositions() {
     return positions;
 }
 
+// Helper function to detect mobile landscape orientation
+function isMobileLandscape() {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth <= 768 && window.innerHeight < window.innerWidth;
+}
+
 function renderFretboard(highlightedPositions = []) {
-    // Calculate correct fret spacing percentages
-    const fretPercentages = calculateFretSpacingPercentages();
+    // In 2D mode on mobile landscape, only show frets 1-12
+    const isMobileLandscapeMode = isMobileLandscape() && state.viewMode === '2d';
+    const maxFret = isMobileLandscapeMode ? 13 : NUM_FRETS; // 13 because we loop from 1 to < maxFret
+    
+    // Calculate correct fret spacing percentages (only for frets we'll display)
+    const fretPercentages = calculateFretSpacingPercentages(maxFret);
     
     let fretboardHTML = '<div class="fretboard">';
 
@@ -2688,11 +2701,12 @@ function renderFretboard(highlightedPositions = []) {
     // Calculate cumulative positions for absolute positioning
     // Position dots in the center of each fret space
     let cumulativePos = 0;
-    for (let i = 1; i < NUM_FRETS; i++) {
+    for (let i = 1; i < maxFret; i++) {
         const spaceWidth = fretPercentages[i - 1];
         // Center position of this fret space (between previous fret and current fret)
         const centerPos = cumulativePos + (spaceWidth / 2);
         
+        // Only show markers for frets we're displaying
         if (markerFrets.includes(i)) {
             if (i === 12) {
                 // Double dots for 12th fret
@@ -2716,8 +2730,8 @@ function renderFretboard(highlightedPositions = []) {
                 <div class="frets">
         `;
 
-        // Render each fret (starting from 1)
-        for (let fretIndex = 1; fretIndex < NUM_FRETS; fretIndex++) {
+        // Render each fret (starting from 1, up to maxFret)
+        for (let fretIndex = 1; fretIndex < maxFret; fretIndex++) {
             const note = getNoteAt(stringIndex, fretIndex);
             const isHighlighted = highlightedPositions.some(
                 pos => pos.string === stringIndex && pos.fret === fretIndex
@@ -2742,7 +2756,7 @@ function renderFretboard(highlightedPositions = []) {
 
     // Add fret numbers
     fretboardHTML += '<div class="fret-numbers">';
-    for (let i = 1; i < NUM_FRETS; i++) {
+    for (let i = 1; i < maxFret; i++) {
         const percentage = fretPercentages[i - 1];
         fretboardHTML += `<div class="fret-number" style="flex-basis: ${percentage}%">${i}</div>`;
     }
@@ -4201,9 +4215,42 @@ function initCSSRotationControls() {
 /* ========================================
    INITIALIZATION
    ======================================== */
+// Function to re-render 2D fretboard when orientation changes
+function handleOrientationChange() {
+    // Only re-render if we're in 2D mode and on a game screen
+    if (state.viewMode === '2d' && state.currentScreen !== 'menu') {
+        const container = document.getElementById('threeContainer');
+        if (container && container.classList.contains('use-css-fallback')) {
+            // Determine game mode from current screen
+            let gameMode = 'singleNote';
+            if (state.currentScreen === 'findAll') {
+                gameMode = 'findAll';
+            } else if (state.currentScreen === 'triads') {
+                gameMode = 'triads';
+            }
+            
+            // Re-render the fretboard with current highlighted positions
+            fallbackToCSS(container, gameMode);
+        }
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Load settings from cookies first
     loadSettingsFromCookies();
     renderMenu();
+    
+    // Add orientation change listener for mobile devices
+    window.addEventListener('orientationchange', () => {
+        // Use setTimeout to ensure the orientation change has completed
+        setTimeout(handleOrientationChange, 100);
+    });
+    
+    // Also listen to resize events (some devices fire resize instead of orientationchange)
+    let resizeTimeout;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(handleOrientationChange, 150);
+    });
 });
 
