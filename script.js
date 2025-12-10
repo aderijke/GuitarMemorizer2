@@ -2675,16 +2675,9 @@ function calculateFretCumulativePositions() {
     return positions;
 }
 
-// Helper function to detect mobile landscape orientation
-function isMobileLandscape() {
-    if (typeof window === 'undefined') return false;
-    return window.innerWidth <= 768 && window.innerHeight < window.innerWidth;
-}
-
 function renderFretboard(highlightedPositions = []) {
-    // In 2D mode on mobile landscape, only show frets 1-12
-    const isMobileLandscapeMode = isMobileLandscape() && state.viewMode === '2d';
-    const maxFret = isMobileLandscapeMode ? 13 : NUM_FRETS; // 13 because we loop from 1 to < maxFret
+    // In 2D mode, only show frets 1-12 (fret 13 and above are hidden)
+    const maxFret = state.viewMode === '2d' ? 13 : NUM_FRETS; // 13 because we loop from 1 to < maxFret
     
     // Calculate correct fret spacing percentages (only for frets we'll display)
     const fretPercentages = calculateFretSpacingPercentages(maxFret);
